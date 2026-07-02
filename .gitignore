@@ -13,3 +13,4 @@ dataset_example/droid_subset/annotation/val_old*
 dataset_example/droid_new_setup_eval*
 .vscode
 process.py
+checkpoints/

@@ -108,6 +108,16 @@ class wm_args:
             self.instruction = [""] * len(self.val_id)
             self.task_name = "Rollouts_replay"
 
+        elif self.task_type == "robocasa":
+            # RoboCasa OpenDrawer, zero-shot on the pretrained DROID checkpoint.
+            # Dataset produced by scripts/convert_robocasa_to_ctrlworld.py
+            self.val_dataset_dir = "dataset_example/robocasa_opendrawer"
+            self.val_id = ["0", "3", "7", "9", "10", "12"]
+            self.start_idx = [0] * len(self.val_id)
+            self.instruction = [""] * len(self.val_id)  # overridden by each anno's recorded text
+            self.data_stat_path = "dataset_meta_info/robocasa_opendrawer/stat.json"
+            self.task_name = "Rollouts_robocasa"
+
         elif self.task_type == "keyboard":
             self.val_dataset_dir = "dataset_example/droid_subset"
             self.val_id = ["1799"]

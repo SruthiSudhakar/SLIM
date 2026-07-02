@@ -1,0 +1,95 @@
+========================================================================
+Ctrl-World — DROID action-replay demo: how to run it yourself
+========================================================================
+
+Generates videos where the robot arm moves by replaying recorded DROID
+actions through the pretrained Ctrl-World world model.
+
+
+------------------------------------------------------------------------
+1. SETUP (run these in every new terminal)
+------------------------------------------------------------------------
+source /proj/vondrick3/sruthi/miniconda3/etc/profile.d/conda.sh
+conda activate ctrl-world
+cd /proj/vondrick3/sruthi/Appaji/SLIM/Ctrl-World
+
+
+------------------------------------------------------------------------
+2. PICK A FREE GPU (needs ~32 GB free)
+------------------------------------------------------------------------
+nvidia-smi --query-gpu=index,memory.used --format=csv,noheader
+
+Pick an index with plenty free, then use it as CUDA_VISIBLE_DEVICES below.
+
+
+------------------------------------------------------------------------
+3. RUN THE DEMO (the exact command that generated the videos)
+------------------------------------------------------------------------
+CUDA_VISIBLE_DEVICES=7 python scripts/rollout_replay_traj.py \
+  --dataset_root_path dataset_example \
+  --dataset_meta_info_path dataset_meta_info \
+  --dataset_names droid_subset \
+  --svd_model_path checkpoints/svd \
+  --clip_model_path checkpoints/clip \
+  --ckpt_path checkpoints/ctrl-world/checkpoint-10000.pt
+
+- Output videos: synthetic_traj/Rollouts_replay/video/
+- Filenames are timestamped, so every run ADDS new files (never overwrites).
+- Re-running as-is regenerates the SAME 3 trajectories (just new files).
+- Runtime ~= 16 s x 12 interaction steps x (number of trajectories).
+  ~3 min for the default 3 trajectories.
+
+
+------------------------------------------------------------------------
+4. GENERATE DIFFERENT / MORE VIDEOS
+------------------------------------------------------------------------
+Which trajectories run is NOT a CLI flag -- it is set in config.py.
+Edit the "replay" block (around lines 104-109):
+
+    if self.task_type == "replay":
+        self.val_dataset_dir = "dataset_example/droid_subset"
+        self.val_id = ["899", "18599", "199"]      # which trajectories
+        self.start_idx = [8, 14, 8]                # start frame per id
+        self.instruction = [""] * len(self.val_id)
+        self.task_name = "Rollouts_replay"
+
+Rules:
+- Give ONE start_idx per val_id (both lists same length).
+- interact_num (default 12, config.py:83) controls video length.
+- The rollout consumes pred_step*interact_num + 8 = 5*12+8 = 68 frames
+  from start_idx. If a trajectory is shorter, the tail freezes on the
+  last real frame -- prefer long trajectories for fully-moving clips.
+- Instructions are pulled from each trajectory's annotation automatically
+  (the self.instruction = [""] line is overridden by the recorded text).
+
+
+------------------------------------------------------------------------
+5. TRAJECTORIES AVAILABLE IN THE BUNDLED SUBSET
+------------------------------------------------------------------------
+(This is all you have without downloading the full DROID dataset.)
+
+    id      length   instruction
+    899     121      Move the banana to the right
+    18599    72      Pick the black thing from the chair...
+    1799     41      (no text)
+    199      33      Move the green towel to the right
+
+Example using all four with varied starts:
+
+    self.val_id    = ["899", "899", "18599", "1799"]
+    self.start_idx = [8,      40,    14,      5]
+
+Tip: reuse 899 (len 121) with different start_idx values (8, 30, 50, ...)
+to get several distinct fully-moving clips from one trajectory.
+
+
+------------------------------------------------------------------------
+6. NOTES
+------------------------------------------------------------------------
+- The bundled subset contains only those 4 trajectories. Generating
+  videos from OTHER DROID scenes requires downloading + preprocessing the
+  full DROID dataset (the dataset_example/extract_latent.py path) -- a
+  separate, larger task.
+- Video layout: 3 camera views side-by-side (2 exterior + 1 wrist),
+  each with GROUND TRUTH on top and MODEL-GENERATED on the bottom.
+- I/O format details: see CTRL_WORLD_IO_NOTES.md in this repo.
