@@ -27,7 +27,8 @@ import math
 
 def main(args):
     logger = get_logger(__name__, log_level="INFO")
-    swanlab.sync_wandb()
+    # swanlab.sync_wandb()  # disabled: forces SwanLab online login (needs a TTY); headless run
+    #                        uses wandb offline only. Metrics still logged via accelerator wandb tracker.
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
@@ -261,6 +262,10 @@ if __name__ == "__main__":
         return args
     
     args = merge_args(args, args_new)
+    # dataset_cfgs is not a CLI arg; mirror it onto dataset_names (config's own intent:
+    # `dataset_cfgs = dataset_names`) so the {mode}_sample.json index is read from the
+    # right dataset when --dataset_names is overridden on the command line.
+    args.dataset_cfgs = args.dataset_names
 
     main(args)
 

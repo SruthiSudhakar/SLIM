@@ -29,10 +29,12 @@ class wm_args:
 
     # logs parameters
     debug = False
-    tag = 'doird_subset'
+    # tag drives output_dir; set RUN_TAG env (train_robocasa.sh stamps it with a timestamp
+    # once in the shell so all 8 procs share it) to keep each run in its own dir -> no overwrite.
+    tag = os.environ.get('RUN_TAG', 'robocasa_opendrawer')  # was 'doird_subset'
     output_dir = f"model_ckpt/{tag}"
     wandb_run_name = tag
-    wandb_project_name = "droid_example"
+    wandb_project_name = "robocasa_opendrawer"
 
 
     # training parameters
@@ -42,9 +44,9 @@ class wm_args:
     train_batch_size = 4
     shuffle = True
     num_train_epochs = 100
-    max_train_steps = 500000
-    checkpointing_steps = 20000
-    validation_steps = 2500
+    max_train_steps = 30000       # short single-task adaptation from pretrained (was 500000)
+    checkpointing_steps = 5000    # was 20000
+    validation_steps = 1000       # video samples every 1k (was 2500)
     max_grad_norm = 1.0
     # for val
     video_num= 10
