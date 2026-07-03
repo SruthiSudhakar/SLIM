@@ -181,6 +181,14 @@ model_ckpt/<RUN_TAG>/                                  # e.g. robocasa_opendrawe
 # bottom=model prediction). 6 tiles across = 2 val samples x 3 views.
 # Filenames are step-numbered, so validations NEVER overwrite each other
 # within a run. (A fresh restart from step 0 WOULD reuse names.)
+#
+# HISTORY vs PREDICTED markers (added to train_wm.py validate_video_generation):
+#   GREEN border = history frames (match GT by construction),
+#   RED border   = predicted future frames (judge bottom=pred vs top=GT here),
+#   white line   = divides GT row (top) from history+prediction row (bottom).
+# Fresh runs get these automatically. For a run started BEFORE this was added,
+# annotate its existing videos post-hoc (non-destructive -> samples_annotated/):
+#   python scripts/annotate_val_videos.py model_ckpt/<RUN_TAG>/samples
 
 
 ------------------------------------------------------------------------
@@ -224,3 +232,74 @@ CUDA_VISIBLE_DEVICES=0 python scripts/rollout_replay_traj.py \
   --svd_model_path checkpoints/svd --clip_model_path checkpoints/clip \
   --ckpt_path model_ckpt/<RUN_TAG>/checkpoint-30000.pt \
   --task_type robocasa
+
+
+########################################################################
+########################################################################
+   GR00T POLICY ROLLOUTS -> WORLD-MODEL DATA (VLAW-style co-training)
+########################################################################
+########################################################################
+
+Goal: fine-tune the world model on the GR00T policy's OWN rollout
+distribution (all 18 tasks, success+failure), combined with the demo set.
+
+The stock GR00T eval (Isaac-GR00T/run.sh) saves only a 1-camera viewing
+video + success. The world model needs per-step 7-D EEF proprio + 3 views
+-- both already flow through the rollout obs, just weren't saved. We added
+a recorder to capture them (off by default; --record_traj_dir turns it on).
+
+Files added (Isaac-GR00T):
+  gr00t/eval/wrappers/trajectory_recording_wrapper.py   # new recorder wrapper
+  gr00t/eval/simulation.py                              # SimulationConfig.record_traj_dir + wiring
+  scripts/run_eval.py                                   # --record_traj_dir flag
+Converter added (Ctrl-World):
+  scripts/build_gr00t_rollout_dataset.py
+
+------------------------------------------------------------------------
+STEP 1 (needs 1 GPU) -- VALIDATE the recorder on a tiny run
+------------------------------------------------------------------------
+source /proj/vondrick3/sruthi/miniconda3/etc/profile.d/conda.sh
+conda activate gr00t
+cd /proj/vondrick3/sruthi/Appaji/robot_critics_that_sweat_the_small_stuff/Isaac-GR00T   # note: run.sh cd's here
+CKPT=/proj/vondrick3/sruthi/Appaji/robot_critics_that_sweat_the_small_stuff/released_checkpoints_groot/gr00t_n1-5/multitask_learning/checkpoint-120000
+CUDA_VISIBLE_DEVICES=0 MUJOCO_GL=egl python scripts/run_eval.py \
+  --model_path "$CKPT" --data_config panda_omron --embodiment_tag new_embodiment \
+  --task_set OpenDrawer --split pretrain --port 5600 --n_envs 2 --n_episodes 2 \
+  --render_camera robot0_agentview_right \
+  --record_traj_dir "$CKPT"
+
+------------------------------------------------------------------------
+STEP 2 -- FULL record: run.sh already loops 18 tasks x5 with the flag baked in
+------------------------------------------------------------------------
+./run.sh CoffeeSetupMug 3 5555
+# (arg1=task, arg2=gpu, arg3=base_port):
+
+------------------------------------------------------------------------
+STEP 3 -- CONVERT rollouts -> Ctrl-World format (robocasa_dp env, 1 GPU)
+------------------------------------------------------------------------
+cd /proj/vondrick3/sruthi/Appaji/SLIM/Ctrl-World
+CUDA_VISIBLE_DEVICES=0 /proj/vondrick3/sruthi/miniconda3/envs/robocasa_dp/bin/python \
+  scripts/build_gr00t_rollout_dataset.py \
+  --record_dir /proj/vondrick3/sruthi/Appaji/robot_critics_that_sweat_the_small_stuff/released_checkpoints_groot/gr00t_n1-5/multitask_learning/checkpoint-120000/evals/pretrain \
+  --name robocasa_gr00t_rollouts --val_per_task 2 --no_train_video
+# --record_dir = wherever the recordings landed (default = $CKPT/evals/pretrain). The
+# converter globs **/traj.npz recursively, so runs WITHOUT recordings are simply ignored.
+# -> dataset_example/robocasa_gr00t_rollouts/ + dataset_meta_info/robocasa_gr00t_rollouts/
+
+------------------------------------------------------------------------
+STEP 4 -- POST-TRAIN on demo + rollouts COMBINED
+------------------------------------------------------------------------
+# In config.py set the mixing weights (2 datasets): prob = [0.5, 0.5]
+# Then launch with a '+'-joined dataset_names (loader mixes them; each uses its
+# own stat.json; train_wm mirrors dataset_cfgs onto dataset_names automatically):
+export RUN_TAG="robocasa_demo_plus_gr00t_$(date +%Y%m%d_%H%M%S)"
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 WANDB_MODE=online SWANLAB_MODE=disabled \
+accelerate launch --multi_gpu --num_processes 8 --num_machines 1 \
+  --mixed_precision fp16 --main_process_port 29501 scripts/train_wm.py \
+  --dataset_root_path dataset_example --dataset_meta_info_path dataset_meta_info \
+  --dataset_names robocasa_opendrawer_full+robocasa_gr00t_rollouts \
+  --svd_model_path checkpoints/svd --clip_model_path checkpoints/clip \
+  --ckpt_path checkpoints/ctrl-world/checkpoint-10000.pt
+
+# NOTE: recorder captures the SAME modality as the demo data (3 views + eef pose),
+# so build_state_7d and the whole pipeline are reused unchanged. Disk: mp4s ~1-2MB/ep.

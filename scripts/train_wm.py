@@ -25,6 +25,26 @@ from config import wm_args
 import math
 
 
+def annotate_val_video(videos, num_history, border=5):
+    """Mark the temporal frames of a stacked val video so it's obvious which frames are
+    replayed HISTORY (border=green; matches GT by construction) vs model-PREDICTED future
+    (border=red; the ones to actually judge against GT). Also draws a white horizontal
+    divider between the top (ground-truth) row and the bottom (history+prediction) row.
+    videos: (T, H, W, 3) uint8, T = num_history + num_frames. Returns annotated copy.
+    """
+    GREEN = np.array([0, 200, 0], np.uint8)    # history (context)
+    RED   = np.array([220, 0, 0], np.uint8)    # predicted future  -> compare top(GT) vs bottom(pred)
+    WHITE = np.array([255, 255, 255], np.uint8)
+    out = videos.copy()
+    T, H, W, _ = out.shape
+    for t in range(T):
+        c = GREEN if t < num_history else RED
+        out[t, :border, :] = c; out[t, -border:, :] = c
+        out[t, :, :border] = c; out[t, :, -border:] = c
+    out[:, H // 2 - 1:H // 2 + 1, :] = WHITE   # GT (top) vs history+prediction (bottom)
+    return out
+
+
 def main(args):
     logger = get_logger(__name__, log_level="INFO")
     # swanlab.sync_wandb()  # disabled: forces SwanLab online login (needs a TTY); headless run
@@ -233,7 +253,13 @@ def validate_video_generation(model, val_dataset, args, train_steps, videos_dir,
     videos = np.concatenate([video_gt[:, :args.num_history],videos],axis=1) #(2,16,512,256,3)
     videos = np.concatenate([video_gt,videos],axis=-3) #(2,16,512,256,3)
     videos = np.concatenate([video for video in videos],axis=-2).astype(np.uint8) # (16,512,256*batch,3)
-    
+
+    # visually mark history (green border) vs predicted-future (red border) frames, and
+    # divide the GT row (top) from the history+prediction row (bottom). Frames 0..num_history-1
+    # are history (both rows are GT); frames num_history.. are the future where the bottom row is
+    # the model prediction to compare against the GT on top.
+    videos = annotate_val_video(videos, args.num_history)
+
     os.makedirs(f"{videos_dir}/samples", exist_ok=True)
     filename = f"{videos_dir}/samples/train_steps_{train_steps}_{id}.mp4"
     mediapy.write_video(filename, videos, fps=2)
