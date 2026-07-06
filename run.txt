@@ -1,253 +1,3 @@
-========================================================================
-Ctrl-World — DROID action-replay demo: how to run it yourself
-========================================================================
-
-Generates videos where the robot arm moves by replaying recorded DROID
-actions through the pretrained Ctrl-World world model.
-
-
-------------------------------------------------------------------------
-1. SETUP (run these in every new terminal)
-------------------------------------------------------------------------
-source /proj/vondrick3/sruthi/miniconda3/etc/profile.d/conda.sh
-conda activate ctrl-world
-cd /proj/vondrick3/sruthi/Appaji/SLIM/Ctrl-World
-
-
-------------------------------------------------------------------------
-2. PICK A FREE GPU (needs ~32 GB free)
-------------------------------------------------------------------------
-nvidia-smi --query-gpu=index,memory.used --format=csv,noheader
-
-Pick an index with plenty free, then use it as CUDA_VISIBLE_DEVICES below.
-
-
-------------------------------------------------------------------------
-3. RUN THE DEMO (the exact command that generated the videos)
-------------------------------------------------------------------------
-CUDA_VISIBLE_DEVICES=7 python scripts/rollout_replay_traj.py \
-  --dataset_root_path dataset_example \
-  --dataset_meta_info_path dataset_meta_info \
-  --dataset_names droid_subset \
-  --svd_model_path checkpoints/svd \
-  --clip_model_path checkpoints/clip \
-  --ckpt_path checkpoints/ctrl-world/checkpoint-10000.pt
-
-- Output videos: synthetic_traj/Rollouts_replay/video/
-- Filenames are timestamped, so every run ADDS new files (never overwrites).
-- Re-running as-is regenerates the SAME 3 trajectories (just new files).
-- Runtime ~= 16 s x 12 interaction steps x (number of trajectories).
-  ~3 min for the default 3 trajectories.
-
-
-------------------------------------------------------------------------
-4. GENERATE DIFFERENT / MORE VIDEOS
-------------------------------------------------------------------------
-Which trajectories run is NOT a CLI flag -- it is set in config.py.
-Edit the "replay" block (around lines 104-109):
-
-    if self.task_type == "replay":
-        self.val_dataset_dir = "dataset_example/droid_subset"
-        self.val_id = ["899", "18599", "199"]      # which trajectories
-        self.start_idx = [8, 14, 8]                # start frame per id
-        self.instruction = [""] * len(self.val_id)
-        self.task_name = "Rollouts_replay"
-
-Rules:
-- Give ONE start_idx per val_id (both lists same length).
-- interact_num (default 12, config.py:83) controls video length.
-- The rollout consumes pred_step*interact_num + 8 = 5*12+8 = 68 frames
-  from start_idx. If a trajectory is shorter, the tail freezes on the
-  last real frame -- prefer long trajectories for fully-moving clips.
-- Instructions are pulled from each trajectory's annotation automatically
-  (the self.instruction = [""] line is overridden by the recorded text).
-
-
-------------------------------------------------------------------------
-5. TRAJECTORIES AVAILABLE IN THE BUNDLED SUBSET
-------------------------------------------------------------------------
-(This is all you have without downloading the full DROID dataset.)
-
-    id      length   instruction
-    899     121      Move the banana to the right
-    18599    72      Pick the black thing from the chair...
-    1799     41      (no text)
-    199      33      Move the green towel to the right
-
-Example using all four with varied starts:
-
-    self.val_id    = ["899", "899", "18599", "1799"]
-    self.start_idx = [8,      40,    14,      5]
-
-Tip: reuse 899 (len 121) with different start_idx values (8, 30, 50, ...)
-to get several distinct fully-moving clips from one trajectory.
-
-
-------------------------------------------------------------------------
-6. NOTES
-------------------------------------------------------------------------
-- The bundled subset contains only those 4 trajectories. Generating
-  videos from OTHER DROID scenes requires downloading + preprocessing the
-  full DROID dataset (the dataset_example/extract_latent.py path) -- a
-  separate, larger task.
-- Video layout: 3 camera views side-by-side (2 exterior + 1 wrist),
-  each with GROUND TRUTH on top and MODEL-GENERATED on the bottom.
-- I/O format details: see CTRL_WORLD_IO_NOTES.md in this repo.
-
-
-########################################################################
-########################################################################
-   ROBOCASA ADAPTATION  (OpenDrawer)  -- build dataset + post-train
-########################################################################
-########################################################################
-
-Adapts the pretrained (DROID) Ctrl-World to the RoboCasa OpenDrawer
-dataset: converts RoboCasa -> Ctrl-World format, then post-trains
-(resumes from checkpoint-10000.pt) on 8 GPUs.
-
-
-------------------------------------------------------------------------
-A. TWO CONDA ENVS ARE USED (each new terminal)
-------------------------------------------------------------------------
-source /proj/vondrick3/sruthi/miniconda3/etc/profile.d/conda.sh
-cd /proj/vondrick3/sruthi/Appaji/SLIM/Ctrl-World
-
-# ctrl-world  : runs training + inference (torch 2.7.1+cu126). NO pyarrow.
-# robocasa_dp : runs the dataset BUILDER (needs pyarrow to read RoboCasa
-#               parquet) AND has torch+cuda+diffusers to VAE-encode.
-#   -> /proj/vondrick3/sruthi/miniconda3/envs/robocasa_dp/bin/python
-
-# One-time extra deps installed into ctrl-world for the training loader:
-#   pip install --no-deps torchvision==0.22.1
-#   pip install omegaconf imageio imageio-ffmpeg
-
-
-------------------------------------------------------------------------
-B. BUILD THE FULL TRAIN/VAL DATASET  (already done; ~27 min, 1 GPU)
-------------------------------------------------------------------------
-# Reads RoboCasa OpenDrawer LeRobot data, writes Ctrl-World-format
-# latents+annotations+meta. Skips episodes already built (resumable).
-CUDA_VISIBLE_DEVICES=0 \
-/proj/vondrick3/sruthi/miniconda3/envs/robocasa_dp/bin/python \
-  scripts/build_robocasa_dataset.py \
-  --name robocasa_opendrawer_full --val_count 20 --min_val_len 70 --no_train_video
-
-# Produces:
-#   dataset_example/robocasa_opendrawer_full/{annotation,latent_videos,videos}/{train,val}/
-#   dataset_meta_info/robocasa_opendrawer_full/{stat.json,train_sample.json,val_sample.json}
-#   (494 train / 20 val episodes; 30851 train / 1646 val samples)
-# Quick val-only demo set (for the replay rollout) came from a different
-# script: scripts/convert_robocasa_to_ctrlworld.py
-
-
-------------------------------------------------------------------------
-C. LAUNCH POST-TRAINING  (8 GPUs, ~16-17 h for 30k steps)
-------------------------------------------------------------------------
-# All commands are wrapped in scripts/train_robocasa.sh -- just run it:
-bash scripts/train_robocasa.sh
-
-# It executes (schedule lives in config.py: max_train_steps=30000,
-# checkpointing_steps=5000, validation_steps=1000):
-#
-#   export RUN_TAG="robocasa_opendrawer_$(date +%Y%m%d_%H%M%S)"   # unique per run
-#   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 WANDB_MODE=online SWANLAB_MODE=disabled \
-#   accelerate launch --multi_gpu --num_processes 8 --num_machines 1 \
-#     --mixed_precision fp16 --main_process_port 29501 \
-#     scripts/train_wm.py \
-#     --dataset_root_path dataset_example \
-#     --dataset_meta_info_path dataset_meta_info \
-#     --dataset_names robocasa_opendrawer_full \
-#     --svd_model_path checkpoints/svd --clip_model_path checkpoints/clip \
-#     --ckpt_path checkpoints/ctrl-world/checkpoint-10000.pt
-#
-# RUN_TAG: each launch stamps a unique timestamped output dir so restarts
-#   NEVER overwrite previous runs. Reuse a name: RUN_TAG=my_name bash scripts/train_robocasa.sh
-# wandb: ONLINE (logged in as sruthis). A run URL is printed at startup, e.g.
-#   https://wandb.ai/sruthis/robocasa_opendrawer/runs/<id>
-#
-# To run in the background and keep a log:
-#   bash scripts/train_robocasa.sh > /tmp/robocasa_train.log 2>&1 &
-
-
-------------------------------------------------------------------------
-D. OUTPUTS
-------------------------------------------------------------------------
-model_ckpt/<RUN_TAG>/                                  # e.g. robocasa_opendrawer_20260702_130917
-  checkpoint-{5000,10000,15000,20000,25000,30000}.pt   # every 5k steps
-  samples/train_steps_<step>_<id>.mp4                  # val videos every 1k steps
-
-# Sample video = 11 frames @ 2fps (~5.5s): FIRST 6 frames = past/history
-# (same top & bottom), LAST 5 frames = FUTURE (top=ground truth,
-# bottom=model prediction). 6 tiles across = 2 val samples x 3 views.
-# Filenames are step-numbered, so validations NEVER overwrite each other
-# within a run. (A fresh restart from step 0 WOULD reuse names.)
-#
-# HISTORY vs PREDICTED markers (added to train_wm.py validate_video_generation):
-#   GREEN border = history frames (match GT by construction),
-#   RED border   = predicted future frames (judge bottom=pred vs top=GT here),
-#   white line   = divides GT row (top) from history+prediction row (bottom).
-# Fresh runs get these automatically. For a run started BEFORE this was added,
-# annotate its existing videos post-hoc (non-destructive -> samples_annotated/):
-#   python scripts/annotate_val_videos.py model_ckpt/<RUN_TAG>/samples
-
-
-------------------------------------------------------------------------
-E. MONITOR
-------------------------------------------------------------------------
-# live step / loss (log uses \r, so translate to newlines):
-tr '\r' '\n' < /tmp/robocasa_train.log | grep -E "Steps:|train_loss" | tail
-# GPUs:
-nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
-# checkpoints / samples as they land (RUN_TAG dir is printed at launch):
-ls -lt model_ckpt/<RUN_TAG> model_ckpt/<RUN_TAG>/samples
-
-# wandb is ONLINE: open the run URL printed at startup
-#   https://wandb.ai/sruthis/robocasa_opendrawer/runs/<id>
-# grep it from the log:
-grep "View run at" /tmp/robocasa_train.log
-
-
-------------------------------------------------------------------------
-F. FIXES APPLIED TO MAKE train_wm.py RUN HEADLESS (already in repo)
-------------------------------------------------------------------------
-1. scripts/train_wm.py: after merge_args added
-     args.dataset_cfgs = args.dataset_names
-   (else the loader reads droid_subset's sample index, not ours).
-2. scripts/train_wm.py: commented out swanlab.sync_wandb() (it forces a
-   SwanLab ONLINE login that needs a TTY and crashes rank0).
-3. config.py: tag/max_train_steps/checkpointing_steps/validation_steps set
-   for the short RoboCasa adaptation (these are NOT CLI-overridable).
-
-
-------------------------------------------------------------------------
-G. EVALUATE A TRAINED CHECKPOINT (after training)  -- ctrl-world env
-------------------------------------------------------------------------
-# Autoregressive replay rollout on RoboCasa val, using a trained ckpt.
-# (Point the robocasa branch in config.py at robocasa_opendrawer_full +
-#  its stat.json first, or reuse the small robocasa demo set.)
-CUDA_VISIBLE_DEVICES=0 python scripts/rollout_replay_traj.py \
-  --dataset_root_path dataset_example \
-  --dataset_meta_info_path dataset_meta_info \
-  --dataset_names robocasa_opendrawer_full \
-  --svd_model_path checkpoints/svd --clip_model_path checkpoints/clip \
-  --ckpt_path model_ckpt/<RUN_TAG>/checkpoint-30000.pt \
-  --task_type robocasa
-
-
-########################################################################
-########################################################################
-   GR00T POLICY ROLLOUTS -> WORLD-MODEL DATA (VLAW-style co-training)
-########################################################################
-########################################################################
-
-Goal: fine-tune the world model on the GR00T policy's OWN rollout
-distribution (all 18 tasks, success+failure), combined with the demo set.
-
-The stock GR00T eval (Isaac-GR00T/run.sh) saves only a 1-camera viewing
-video + success. The world model needs per-step 7-D EEF proprio + 3 views
--- both already flow through the rollout obs, just weren't saved. We added
-a recorder to capture them (off by default; --record_traj_dir turns it on).
-
 Files added (Isaac-GR00T):
   gr00t/eval/wrappers/trajectory_recording_wrapper.py   # new recorder wrapper
   gr00t/eval/simulation.py                              # SimulationConfig.record_traj_dir + wiring
@@ -256,50 +6,48 @@ Converter added (Ctrl-World):
   scripts/build_gr00t_rollout_dataset.py
 
 ------------------------------------------------------------------------
-STEP 1 (needs 1 GPU) -- VALIDATE the recorder on a tiny run
+STEP 1 -- FULL record: run.sh already loops 18 tasks x5 with the flag baked in
 ------------------------------------------------------------------------
-source /proj/vondrick3/sruthi/miniconda3/etc/profile.d/conda.sh
-conda activate gr00t
-cd /proj/vondrick3/sruthi/Appaji/robot_critics_that_sweat_the_small_stuff/Isaac-GR00T   # note: run.sh cd's here
-CKPT=/proj/vondrick3/sruthi/Appaji/robot_critics_that_sweat_the_small_stuff/released_checkpoints_groot/gr00t_n1-5/multitask_learning/checkpoint-120000
-CUDA_VISIBLE_DEVICES=0 MUJOCO_GL=egl python scripts/run_eval.py \
-  --model_path "$CKPT" --data_config panda_omron --embodiment_tag new_embodiment \
-  --task_set OpenDrawer --split pretrain --port 5600 --n_envs 2 --n_episodes 2 \
-  --render_camera robot0_agentview_right \
-  --record_traj_dir "$CKPT"
+./run.sh CoffeeSetupMug 3 5555 # (arg1=task, arg2=gpu, arg3=base_port):
 
 ------------------------------------------------------------------------
-STEP 2 -- FULL record: run.sh already loops 18 tasks x5 with the flag baked in
-------------------------------------------------------------------------
-./run.sh CoffeeSetupMug 3 5555
-# (arg1=task, arg2=gpu, arg3=base_port):
-
-------------------------------------------------------------------------
-STEP 3 -- CONVERT rollouts -> Ctrl-World format (robocasa_dp env, 1 GPU)
+STEP 2 -- CONVERT rollouts -> Ctrl-World format (robocasa_dp env, 1 GPU)
 ------------------------------------------------------------------------
 cd /proj/vondrick3/sruthi/Appaji/SLIM/Ctrl-World
 CUDA_VISIBLE_DEVICES=0 /proj/vondrick3/sruthi/miniconda3/envs/robocasa_dp/bin/python \
   scripts/build_gr00t_rollout_dataset.py \
   --record_dir /proj/vondrick3/sruthi/Appaji/robot_critics_that_sweat_the_small_stuff/released_checkpoints_groot/gr00t_n1-5/multitask_learning/checkpoint-120000/evals/pretrain \
   --name robocasa_gr00t_rollouts --val_per_task 2 --no_train_video
-# --record_dir = wherever the recordings landed (default = $CKPT/evals/pretrain). The
-# converter globs **/traj.npz recursively, so runs WITHOUT recordings are simply ignored.
-# -> dataset_example/robocasa_gr00t_rollouts/ + dataset_meta_info/robocasa_gr00t_rollouts/
+# FASTER (~17 min): shard across 8 GPUs by task, then one meta pass -- all wrapped in:
+#   bash scripts/convert_gr00t_parallel.sh
 
 ------------------------------------------------------------------------
-STEP 4 -- POST-TRAIN on demo + rollouts COMBINED
+STEP 3 -- POST-TRAIN on ALL-TASK demos + policy rollouts COMBINED
 ------------------------------------------------------------------------
-# In config.py set the mixing weights (2 datasets): prob = [0.5, 0.5]
-# Then launch with a '+'-joined dataset_names (loader mixes them; each uses its
-# own stat.json; train_wm mirrors dataset_cfgs onto dataset_names automatically):
-export RUN_TAG="robocasa_demo_plus_gr00t_$(date +%Y%m%d_%H%M%S)"
+export RUN_TAG="robocasa_alltask_demo_plus_gr00t_$(date +%Y%m%d_%H%M%S)"
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 WANDB_MODE=online SWANLAB_MODE=disabled \
 accelerate launch --multi_gpu --num_processes 8 --num_machines 1 \
   --mixed_precision fp16 --main_process_port 29501 scripts/train_wm.py \
   --dataset_root_path dataset_example --dataset_meta_info_path dataset_meta_info \
-  --dataset_names robocasa_opendrawer_full+robocasa_gr00t_rollouts \
+  --dataset_names robocasa_atomic_all+robocasa_gr00t_rollouts \
   --svd_model_path checkpoints/svd --clip_model_path checkpoints/clip \
   --ckpt_path checkpoints/ctrl-world/checkpoint-10000.pt
 
+# (robocasa_opendrawer_full is now superseded by robocasa_atomic_all, which includes OpenDrawer.)
 # NOTE: recorder captures the SAME modality as the demo data (3 views + eef pose),
-# so build_state_7d and the whole pipeline are reused unchanged. Disk: mp4s ~1-2MB/ep.
+# so build_state_7d and the whole pipeline are reused unchanged.
+
+
+------------------------------------------------------------------------
+STEP 4 - EVALUATE A TRAINED CHECKPOINT (after training)  -- ctrl-world env
+------------------------------------------------------------------------
+
+bash scripts/eval_ckpt.sh /proj/vondrick3/sruthi/Appaji/SLIM/Ctrl-World/model_ckpt/robocasa_opendrawer_20260702_130917/checkpoint-45000.pt 0 robocasa_atomic_all 10 random 0
+
+# Output -> synthetic_traj/Rollouts_robocasa_<rundir>__<checkpoint>/video/  (one folder per ckpt)
+# The wrapper auto-picks: --data_stat_path dataset_meta_info/<dataset>/stat.json (MUST match what
+# the ckpt trained on) and auto-discovers val episode ids from dataset_example/<dataset>/annotation/val/.
+#
+# Under the hood it calls rollout_replay_traj.py with new CLI overrides (all optional):
+#   --data_stat_path  --val_dataset_dir  --num_traj  --save_tag
+# so you can point any checkpoint at any eval set without touching config.py.

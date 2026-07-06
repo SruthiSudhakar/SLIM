@@ -292,6 +292,13 @@ if __name__ == "__main__":
     # `dataset_cfgs = dataset_names`) so the {mode}_sample.json index is read from the
     # right dataset when --dataset_names is overridden on the command line.
     args.dataset_cfgs = args.dataset_names
+    # For a '+'-joined multi-dataset run, the sampling prob must have one weight per dataset.
+    # If config.prob doesn't match the dataset count, default to equal weights (edit config.prob
+    # to a matching-length list for custom mixing, e.g. size-weighted).
+    n_ds = len(args.dataset_names.split('+'))
+    if len(args.prob) != n_ds:
+        args.prob = [1.0 / n_ds] * n_ds
+        print(f"dataset mixing prob set to {args.prob} for {n_ds} datasets")
 
     main(args)
 

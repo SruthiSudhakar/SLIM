@@ -229,6 +229,21 @@ if __name__ == "__main__":
     parser.add_argument('--dataset_meta_info_path', type=str, default=None)
     parser.add_argument('--dataset_names', type=str, default=None)
     parser.add_argument('--task_type', type=str, default='replay')
+    # --- flexible eval overrides (avoid editing config.py; run many checkpoints in parallel) ---
+    parser.add_argument('--data_stat_path', type=str, default=None,
+                        help="normalization stats; MUST match what the checkpoint trained on")
+    parser.add_argument('--val_dataset_dir', type=str, default=None,
+                        help="eval-set dir; val episode ids auto-discovered from its annotation/val/")
+    parser.add_argument('--num_traj', type=int, default=None, help="limit number of val episodes")
+    parser.add_argument('--save_tag', type=str, default=None,
+                        help="suffix on the output folder so parallel / other-checkpoint runs don't mix")
+    parser.add_argument('--out_dir', type=str, default=None,
+                        help="write videos directly here (e.g. next to the checkpoint); overrides save_dir/task_name")
+    parser.add_argument('--start_idx', type=str, default=None,
+                        help="start frame index per episode: an int (e.g. 30), or 'random' for a random "
+                             "valid start per episode. Default keeps the config value (0 for a fresh eval set).")
+    parser.add_argument('--seed', type=int, default=0,
+                        help="RNG seed used only when --start_idx random (for reproducible random starts)")
     args_new = parser.parse_args()
 
     args = wm_args(task_type=args_new.task_type)
@@ -238,8 +253,54 @@ if __name__ == "__main__":
             if v is not None:
                 args.__dict__[k] = v
         return args
-    
+
     args = merge_args(args, args_new)
+
+    # --- apply eval overrides (run after merge so they win over the config branch) ---
+    import glob as _glob
+    import random as _random
+    _random.seed(args_new.seed)
+
+    # frames spanned by one episode rollout: get_traj_info samples `steps` frames stride `skip`
+    _span = int(args.pred_step * args.interact_num + 8) * args.skip_step
+
+    def _episode_length(vid):
+        with open(f"{args.val_dataset_dir}/annotation/val/{vid}.json") as f:
+            anno = json.load(f)
+        try:
+            return len(anno['action'])
+        except Exception:
+            return anno['video_length']
+
+    def _start_for(vid):
+        # None -> keep default (0); an int string -> fixed; 'random' -> random valid start
+        if args_new.start_idx is None:
+            return 0
+        if args_new.start_idx == 'random':
+            hi = max(0, _episode_length(vid) - _span)
+            return _random.randint(0, hi)
+        return int(args_new.start_idx)
+
+    if args_new.val_dataset_dir is not None:
+        ids = sorted(os.path.basename(p)[:-5]
+                     for p in _glob.glob(os.path.join(args.val_dataset_dir, "annotation", "val", "*.json")))
+        if args_new.num_traj is not None:
+            ids = ids[:args_new.num_traj]
+        args.val_id = ids
+        args.start_idx = [_start_for(vid) for vid in ids]
+        args.instruction = [""] * len(ids)
+        print(f"eval set {args.val_dataset_dir}: {len(ids)} val episodes")
+        print(f"start_idx ({args_new.start_idx if args_new.start_idx is not None else 0}): {args.start_idx}")
+    elif args_new.num_traj is not None:
+        args.val_id = args.val_id[:args_new.num_traj]
+        args.start_idx = args.start_idx[:args_new.num_traj]
+        args.instruction = args.instruction[:args_new.num_traj]
+        if args_new.start_idx is not None:
+            args.start_idx = [_start_for(vid) for vid in args.val_id]
+    if args_new.save_tag is not None:
+        args.task_name = f"{args.task_name}_{args_new.save_tag}"
+    _outdir = getattr(args, 'out_dir', None) or f"{args.save_dir}/{args.task_name}/video"
+    print(f"ckpt={args.ckpt_path}\n  stat={args.data_stat_path}\n  output -> {_outdir}/")
 
     # create rollout agent
     Agent = agent(args)
@@ -322,10 +383,11 @@ if __name__ == "__main__":
         video = np.concatenate(video_to_save, axis=0)
         task_name = args.task_name
         text_id = text_i.replace(' ', '_').replace(',', '').replace('.', '').replace('\'', '').replace('\"', '')[:30]
-        videos_dir = args.val_model_path.split('/')[:-1]
-        videos_dir = '/'.join(videos_dir)
         uuid = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename_video = f"{args.save_dir}/{task_name}/video/time_{uuid}_traj_{val_id_i}_{start_idx_i}_{pred_step}_{text_id}.mp4"
+        # --out_dir (if set) puts videos directly there (e.g. next to the checkpoint);
+        # otherwise the default synthetic_traj/<task_name>/video/ layout.
+        out_dir = getattr(args, 'out_dir', None) or f"{args.save_dir}/{task_name}/video"
+        filename_video = f"{out_dir}/time_{uuid}_traj_{val_id_i}_{start_idx_i}_{pred_step}_{text_id}.mp4"
         os.makedirs(os.path.dirname(filename_video), exist_ok=True)
         mediapy.write_video(filename_video, video, fps=4)
         print(f"Saving video to {filename_video}")

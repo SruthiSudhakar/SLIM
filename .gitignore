@@ -14,5 +14,6 @@ dataset_example/droid_new_setup_eval*
 .vscode
 process.py
 checkpoints/
-dataset_example/robocasa_opendrawer_full
-dataset_meta_info/robocasa_opendrawer_full
+dataset_example/
+dataset_meta_info/
+todo.txt
