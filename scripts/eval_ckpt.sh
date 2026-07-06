@@ -24,8 +24,9 @@ DS=${3:-robocasa_opendrawer_full}
 N=${4:-6}
 START_IDX=${5:-0}
 SEED=${6:-0}
-# store eval videos right next to the checkpoint: <ckpt_dir>/<ckpt_name>_eval/
-OUT="$(dirname "$CKPT")/$(basename "$CKPT" .pt)_eval"
+# store eval videos right next to the checkpoint, timestamped so runs don't clash:
+#   <ckpt_dir>/<ckpt_name>_eval_<timestamp>/
+OUT="$(dirname "$CKPT")/$(basename "$CKPT" .pt)_eval_$(date +%Y%m%d_%H%M%S)"
 
 echo ">>> eval $CKPT on $DS (gpu $GPU, $N episodes, start_idx=$START_IDX seed=$SEED) -> $OUT/"
 CUDA_VISIBLE_DEVICES=$GPU python scripts/rollout_replay_traj.py \

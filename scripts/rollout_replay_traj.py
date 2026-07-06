@@ -383,11 +383,11 @@ if __name__ == "__main__":
         video = np.concatenate(video_to_save, axis=0)
         task_name = args.task_name
         text_id = text_i.replace(' ', '_').replace(',', '').replace('.', '').replace('\'', '').replace('\"', '')[:30]
-        uuid = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         # --out_dir (if set) puts videos directly there (e.g. next to the checkpoint);
         # otherwise the default synthetic_traj/<task_name>/video/ layout.
+        # No per-video timestamp: the eval run's out_dir is already timestamped (see eval_ckpt.sh).
         out_dir = getattr(args, 'out_dir', None) or f"{args.save_dir}/{task_name}/video"
-        filename_video = f"{out_dir}/time_{uuid}_traj_{val_id_i}_{start_idx_i}_{pred_step}_{text_id}.mp4"
+        filename_video = f"{out_dir}/traj_{val_id_i}_{start_idx_i}_{pred_step}_{text_id}.mp4"
         os.makedirs(os.path.dirname(filename_video), exist_ok=True)
         mediapy.write_video(filename_video, video, fps=4)
         print(f"Saving video to {filename_video}")
