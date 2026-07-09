@@ -61,10 +61,44 @@ def main(args):
     if args.ckpt_path is not None:
         print(f"Loading checkpoint from {args.ckpt_path}!")
         state_dict = torch.load(args.ckpt_path, map_location='cpu')
-        model.load_state_dict(state_dict, strict=True)
+        # Warm start: load with strict=False so newly-added modules (e.g. Change A's temporal
+        # action encoder, absent from older checkpoints) keep their fresh init and the rest of
+        # the model resumes exactly. Guard against silently ignoring genuine mismatches: the
+        # only keys allowed to be missing are the new action-encoder params, and NO checkpoint
+        # key may be left unused.
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        allowed_new = ('action_encoder.temporal_encoder',
+                       'action_encoder.action_time_pos',
+                       'action_encoder.temporal_zero_proj')
+        bad_missing = [k for k in missing if not k.startswith(allowed_new)]
+        if missing:
+            print(f"[warm-start] {len(missing)} missing key(s) kept at fresh init "
+                  f"(new modules): {missing}")
+        assert not bad_missing, f"[warm-start] missing keys NOT from new action encoder: {bad_missing}"
+        assert not unexpected, f"[warm-start] checkpoint has unexpected keys: {unexpected}"
     model.to(accelerator.device)
     model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    # Parameter-group LR: the newly-added Change A modules (temporal action encoder) start from a
+    # zero-init no-op and must "fade in" under the optimizer. Giving ONLY those params a higher LR
+    # speeds that fade-in (faster time-to-signal) without disturbing the warm-started UNet, which
+    # stays at the base LR. action_encoder_lr defaults to the base LR -> identical to before unless set.
+    new_prefixes = ('action_encoder.temporal_encoder',
+                    'action_encoder.action_time_pos',
+                    'action_encoder.temporal_zero_proj')
+    new_params, base_params = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        (new_params if n.startswith(new_prefixes) else base_params).append(p)
+    action_lr = getattr(args, 'action_encoder_lr', args.learning_rate)
+    if new_params and action_lr != args.learning_rate:
+        print(f"[optim] {len(new_params)} Change-A params at lr={action_lr:g}; "
+              f"{len(base_params)} base params at lr={args.learning_rate:g}")
+        optimizer = torch.optim.AdamW(
+            [{'params': base_params, 'lr': args.learning_rate},
+             {'params': new_params,  'lr': action_lr}])
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
 
     # logs
     if accelerator.is_main_process:
@@ -107,7 +141,11 @@ def main(args):
    
     ############################ training ##############################
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-    num_train_epochs = math.ceil(args.max_train_steps * args.gradient_accumulation_steps*total_batch_size / len(train_dataloader))
+    # Epochs needed to reach max_train_steps optimizer steps. steps_per_epoch =
+    # len(train_dataloader)/grad_accum, so epochs = ceil(max_train_steps*grad_accum/len).
+    # (The old formula multiplied by total_batch_size, inflating the count ~total_batch_size x
+    # and — with no hard stop below — running far past max_train_steps.)
+    num_train_epochs = math.ceil(args.max_train_steps * args.gradient_accumulation_steps / len(train_dataloader))
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
@@ -120,6 +158,8 @@ def main(args):
     global_step = 0
     forward_step=0
     train_loss = 0.0
+    train_grad_norm = 0.0   # smoothed total grad norm (pre-clip)
+    train_new_gn = 0.0      # smoothed grad norm of the Change A params (watch fade-in / stability at high LR)
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
@@ -133,7 +173,12 @@ def main(args):
                 accelerator.backward(loss_gen)
                 params_to_clip = model.parameters()
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    train_grad_norm += float(grad_norm) if grad_norm is not None else 0.0
+                    # grad norm of just the Change A params (0 if the module isn't present)
+                    with torch.no_grad():
+                        _gs = [p.grad.norm() for p in new_params if p.grad is not None]
+                        train_new_gn += float(torch.norm(torch.stack(_gs))) if _gs else 0.0
                 optimizer.step()
                 optimizer.zero_grad()
                 forward_step += 1
@@ -143,9 +188,17 @@ def main(args):
                 global_step += 1
                 # log loss every 100 steps
                 if global_step %100 == 0:
-                    progress_bar.set_postfix({"loss": train_loss})
-                    accelerator.log({"train_loss": train_loss/100}, step=global_step)
+                    progress_bar.set_postfix({"loss": train_loss, "gnorm": round(train_grad_norm/100, 3)})
+                    accelerator.log({
+                        "train_loss": train_loss/100,
+                        "grad_norm": train_grad_norm/100,          # total (pre-clip), watch for spikes at high LR
+                        "grad_norm_changeA": train_new_gn/100,     # Change A params only; ~0 for baseline
+                        "lr_base": args.learning_rate,
+                        "lr_action_encoder": getattr(args, 'action_encoder_lr', args.learning_rate),
+                    }, step=global_step)
                     train_loss = 0.0
+                    train_grad_norm = 0.0
+                    train_new_gn = 0.0
                 # save ckpt every checkpointing_steps
                 if global_step % args.checkpointing_steps == 0 and accelerator.is_main_process:
                     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.pt")
@@ -158,6 +211,14 @@ def main(args):
                         for id in range(args.video_num):
                             validate_video_generation(model, val_dataset, args,global_step, args.output_dir, id, accelerator)
                     model.train()
+
+                # hard stop once we've done the requested number of optimizer steps
+                if global_step >= args.max_train_steps:
+                    break
+
+        # propagate the stop out of the epoch loop
+        if global_step >= args.max_train_steps:
+            break
 
 
 

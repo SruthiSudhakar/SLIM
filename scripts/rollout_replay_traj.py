@@ -35,6 +35,20 @@ from scipy.spatial.transform import Rotation as R
 
 
 
+def _psnr_mse_per_frame(pred, gt, max_val=255.0):
+    """Per-frame PSNR (dB) and MSE between predicted and GT rollout frames.
+    pred, gt: (num_views, F, H, W, 3) uint8 arrays of the same shape. Returns two
+    length-F lists: mean MSE and PSNR at each frame (averaged over views/pixels/channels)."""
+    pred = pred.astype(np.float32)
+    gt = gt.astype(np.float32)
+    mses, psnrs = [], []
+    for f in range(pred.shape[1]):
+        mse = float(np.mean((pred[:, f] - gt[:, f]) ** 2))
+        mses.append(mse)
+        psnrs.append(99.0 if mse <= 1e-8 else float(10.0 * np.log10(max_val ** 2 / mse)))
+    return mses, psnrs
+
+
 class agent():
     def __init__(self,args):
           
@@ -59,9 +73,17 @@ class agent():
         #     raise ValueError(f"Unknown policy type: {args.policy_type}")
         # self.policy = policy_config.create_trained_policy(config, checkpoint_dir)
 
-        # load ctrl-world model        
+        # load ctrl-world model
+        # Auto-detect architecture from the checkpoint so eval "just works" for both old
+        # (baseline) and Change-A checkpoints without setting any flag: if the checkpoint
+        # carries the temporal action-encoder weights, build the model with that module.
+        _state_dict = torch.load(args.val_model_path, map_location='cpu')
+        _has_temporal = any(k.startswith('action_encoder.temporal_encoder') for k in _state_dict)
+        args.use_temporal_action_encoder = _has_temporal
+        print(f"[eval] checkpoint {'HAS' if _has_temporal else 'does NOT have'} temporal action encoder "
+              f"-> building model with use_temporal_action_encoder={_has_temporal}")
         self.model = CrtlWorld(args)
-        self.model.load_state_dict(torch.load(args.val_model_path))
+        self.model.load_state_dict(_state_dict)  # strict: verifies arch matches exactly
         self.model.to(self.accelerator.device).to(self.dtype)
         self.model.eval()
         print("load world model success")
@@ -141,7 +163,7 @@ class agent():
         
         return car_action, joint_pos, video_dict, video_latent, instruction
 
-    def forward_wm(self, action_cond, video_latent_true, video_latent_cond, his_cond=None, text=None):
+    def forward_wm(self, action_cond, video_latent_true, video_latent_cond, his_cond=None, text=None, gen_seed=None):
         args = self.args
         image_cond = video_latent_cond
 
@@ -178,6 +200,10 @@ class agent():
                 output_type='latent',
                 return_dict=False,
                 frame_level_cond=True,
+                # Seed the diffusion sampling so baseline vs Change A are generated under IDENTICAL
+                # noise (paired), removing run-to-run sampling variance from the comparison.
+                generator=(torch.Generator(device=self.device).manual_seed(int(gen_seed))
+                           if gen_seed is not None else None),
             )
         latents = einops.rearrange(latents, 'b f c (m h) (n w) -> (b m n) f c h w', m=3,n=1) # (B, 8, 4, 32,32)
 
@@ -244,6 +270,9 @@ if __name__ == "__main__":
                              "valid start per episode. Default keeps the config value (0 for a fresh eval set).")
     parser.add_argument('--seed', type=int, default=0,
                         help="RNG seed used only when --start_idx random (for reproducible random starts)")
+    parser.add_argument('--gen_seed', type=int, default=None,
+                        help="seed for the diffusion SAMPLING noise, so baseline vs Change A are generated "
+                             "under identical noise (paired). None -> unseeded. Use the SAME value for both models.")
     args_new = parser.parse_args()
 
     args = wm_args(task_type=args_new.task_type)
@@ -255,6 +284,7 @@ if __name__ == "__main__":
         return args
 
     args = merge_args(args, args_new)
+    args.gen_seed = args_new.gen_seed  # may be None; merge_args skips None so set explicitly
 
     # --- apply eval overrides (run after merge so they win over the config branch) ---
     import glob as _glob
@@ -310,8 +340,9 @@ if __name__ == "__main__":
     num_frames = args.num_frames
     print(f'rollout with {args.task_type}')
 
+    rollout_metrics = []  # per-trajectory drift metrics (pred vs GT); dumped to rollout_metrics.json
 
-    for val_id_i, text_i, start_idx_i in zip(args.val_id, args.instruction, args.start_idx):
+    for traj_idx, (val_id_i, text_i, start_idx_i) in enumerate(zip(args.val_id, args.instruction, args.start_idx)):
         # read ground truth trajectory informations
         eef_gt, joint_pos_gt, video_dict, video_latents, instruction = Agent.get_traj_info(val_id_i, start_idx=start_idx_i, steps=int(pred_step*interact_num+8))
         text_i = instruction
@@ -320,6 +351,7 @@ if __name__ == "__main__":
         # create buffers and push first frames to history buffer
         predicted_latents = None
         video_to_save = []
+        traj_mse, traj_psnr = [], []  # per-frame drift for this trajectory
         info_to_save = []
         his_cond = []
         his_joint = []
@@ -366,8 +398,11 @@ if __name__ == "__main__":
             assert current_latent.shape == (1, 4, 72, 40), f"Expected current_latent shape (1, 4, 72, 40), got {current_latent.shape}"
             assert action_cond.shape == (int(num_history+num_frames), 7), f"Expected action_cond shape ({int(num_history+num_frames)}, 7), got {action_cond.shape}"
             assert his_cond_input.shape == (1, int(num_history), 4, 72, 40), f"Expected his_cond_input shape (1, {int(num_history)}, 72, 40), got {his_cond_input.shape}"
-            # forward world model
-            videos_cat, true_videos, video_dict_pred, predicted_latents = Agent.forward_wm(action_cond, video_latent_true, current_latent, his_cond=his_cond_input,text=text_i if Agent.args.text_cond else None)
+            # forward world model. Deterministic per-(trajectory, interaction) seed derived from
+            # args.gen_seed: identical across baseline/Change A runs (model-independent) but distinct
+            # per step -> paired, reproducible generation. None -> unseeded (old behaviour).
+            gen_seed = None if getattr(args, 'gen_seed', None) is None else int(args.gen_seed)*1_000_003 + traj_idx*101 + i
+            videos_cat, true_videos, video_dict_pred, predicted_latents = Agent.forward_wm(action_cond, video_latent_true, current_latent, his_cond=his_cond_input,text=text_i if Agent.args.text_cond else None, gen_seed=gen_seed)
 
             print("################ record information ################")
             # push current step to history buffer
@@ -377,6 +412,11 @@ if __name__ == "__main__":
                 video_to_save.append(videos_cat)  # save all frames for the last interaction step
             else:
                 video_to_save.append(videos_cat[:pred_step-1]) # last frame is the first frame of next step, so we remove it here
+
+            # accumulate PSNR/MSE drift on the SAME frames we keep in the saved rollout
+            n_keep = pred_step if i == interact_num - 1 else pred_step - 1
+            mse_f, psnr_f = _psnr_mse_per_frame(video_dict_pred[:, :n_keep], true_videos[:, :n_keep])
+            traj_mse.extend(mse_f); traj_psnr.extend(psnr_f)
                 
         
         # save rollout video and info with parameters
@@ -392,6 +432,45 @@ if __name__ == "__main__":
         mediapy.write_video(filename_video, video, fps=4)
         print(f"Saving video to {filename_video}")
         print("##########################################################################")
+
+        rollout_metrics.append({
+            'traj_id': str(val_id_i), 'start_idx': int(start_idx_i),
+            'num_frames': len(traj_psnr),
+            'mean_psnr': float(np.mean(traj_psnr)) if traj_psnr else 0.0,
+            'mean_mse': float(np.mean(traj_mse)) if traj_mse else 0.0,
+            'psnr_per_frame': traj_psnr, 'mse_per_frame': traj_mse,
+        })
+
+    # ---- aggregate + write drift metrics (pred vs GT over the autoregressive rollout) ----
+    if rollout_metrics:
+        # all trajectories share the same rollout length; average per frame index for the drift curve
+        min_len = min(len(m['psnr_per_frame']) for m in rollout_metrics)
+        psnr_curve = np.mean([m['psnr_per_frame'][:min_len] for m in rollout_metrics], axis=0).tolist()
+        mse_curve = np.mean([m['mse_per_frame'][:min_len] for m in rollout_metrics], axis=0).tolist()
+        summary = {
+            'ckpt': args.ckpt_path,
+            'use_temporal_action_encoder': bool(getattr(args, 'use_temporal_action_encoder', False)),
+            'dataset': getattr(args, 'dataset_names', None),
+            'num_traj': len(rollout_metrics),
+            'rollout_frames': min_len,
+            'mean_psnr': float(np.mean([m['mean_psnr'] for m in rollout_metrics])),
+            'mean_mse': float(np.mean([m['mean_mse'] for m in rollout_metrics])),
+            'psnr_per_frame': psnr_curve,
+            'mse_per_frame': mse_curve,
+        }
+        metrics_path = os.path.join(_outdir, 'rollout_metrics.json')
+        os.makedirs(_outdir, exist_ok=True)
+        with open(metrics_path, 'w') as f:
+            json.dump({'summary': summary, 'per_traj': rollout_metrics}, f, indent=2)
+        print("\n===== rollout drift metrics =====")
+        print(f"  ckpt              : {summary['ckpt']}")
+        print(f"  temporal_encoder  : {summary['use_temporal_action_encoder']}")
+        print(f"  trajectories      : {summary['num_traj']}  ({summary['rollout_frames']} frames each)")
+        print(f"  mean PSNR (dB, higher=better) : {summary['mean_psnr']:.3f}")
+        print(f"  mean MSE  (lower=better)      : {summary['mean_mse']:.2f}")
+        print(f"  PSNR first->last frame        : {psnr_curve[0]:.2f} -> {psnr_curve[-1]:.2f}  (drift over rollout)")
+        print(f"  wrote {metrics_path}")
+        print("=================================")
 
 
 # CUDA_VISIBLE_DEVICES=0 python rollout_replay_traj.py

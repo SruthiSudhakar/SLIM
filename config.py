@@ -34,22 +34,29 @@ class wm_args:
     tag = os.environ.get('RUN_TAG', 'robocasa_opendrawer')  # was 'doird_subset'
     output_dir = f"model_ckpt/{tag}"
     wandb_run_name = tag
-    wandb_project_name = "robocasa_opendrawer"
+    # WANDB_PROJECT env routes runs to a named wandb project (creds read from ~/.netrc).
+    wandb_project_name = os.environ.get('WANDB_PROJECT', "robocasa_opendrawer")
 
 
     # training parameters
     learning_rate= 1e-5 # 5e-6
+    # LR for the newly-added Change A params (temporal action encoder) only; base UNet stays at
+    # learning_rate. Set ACTION_ENCODER_LR higher to speed the zero-init fade-in (faster
+    # time-to-signal) without disturbing the warm-started UNet. Default = base LR (no change).
+    action_encoder_lr = float(os.environ.get('ACTION_ENCODER_LR', learning_rate))
     gradient_accumulation_steps = 1
     mixed_precision = 'fp16'
     train_batch_size = 4
     shuffle = True
     num_train_epochs = 100
-    max_train_steps = 30000       # short single-task adaptation from pretrained (was 500000)
-    checkpointing_steps = 5000    # was 20000
-    validation_steps = 1000       # video samples every 1k (was 2500)
+    # Schedule knobs are env-overridable so fast ablation screening (short runs, light
+    # validation) needs no code edits; defaults reproduce the normal single-task run.
+    max_train_steps = int(os.environ.get('MAX_TRAIN_STEPS', 30000))       # short single-task adaptation from pretrained (was 500000)
+    checkpointing_steps = int(os.environ.get('CHECKPOINTING_STEPS', 5000))    # was 20000
+    validation_steps = int(os.environ.get('VALIDATION_STEPS', 1000))       # video samples every 1k (was 2500)
     max_grad_norm = 1.0
     # for val
-    video_num= 10
+    video_num= int(os.environ.get('VIDEO_NUM', 10))
 
     ############################ model args ##############################
 
@@ -68,6 +75,13 @@ class wm_args:
     text_cond = True
     frame_level_cond = True
     his_cond_zero = False
+    # ---- Change A: temporal action encoder ----
+    # When on, the per-frame action MLP is followed by a 4-layer temporal transformer
+    # (residual, zero-init -> no-op at start) so action tokens become trajectory-aware.
+    # Toggle via env for ablation screening; requires frame_level_cond=True.
+    use_temporal_action_encoder = os.environ.get('USE_TEMPORAL_ACTION_ENCODER', '0') == '1'
+    temporal_action_layers = int(os.environ.get('TEMPORAL_ACTION_LAYERS', 4))
+    temporal_action_heads = int(os.environ.get('TEMPORAL_ACTION_HEADS', 8))
     dtype = torch.bfloat16 # [torch.float32, torch.bfloat16] # during inference, we can use bfloat16 to accelerate the inference speed and save memory
 
 

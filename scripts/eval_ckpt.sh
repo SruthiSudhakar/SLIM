@@ -28,7 +28,25 @@ SEED=${6:-0}
 #   <ckpt_dir>/<ckpt_name>_eval_<timestamp>/
 OUT="$(dirname "$CKPT")/$(basename "$CKPT" .pt)_eval_$(date +%Y%m%d_%H%M%S)"
 
+# write run metadata so evals can be told apart later
+mkdir -p "$OUT"
+cat > "$OUT/meta.json" <<EOF
+{
+  "ckpt_path": "$CKPT",
+  "eval_dataset": "$DS",
+  "num_traj": $N,
+  "start_idx": "$START_IDX",
+  "seed": $SEED,
+  "gpu": "$GPU",
+  "run_time": "$(date +%Y-%m-%d_%H:%M:%S)",
+  "git_commit": "$(git rev-parse HEAD 2>/dev/null || echo unknown)",
+  "git_branch": "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)",
+  "command": "$0 $*"
+}
+EOF
+
 echo ">>> eval $CKPT on $DS (gpu $GPU, $N episodes, start_idx=$START_IDX seed=$SEED) -> $OUT/"
+echo ">>> wrote $OUT/meta.json"
 CUDA_VISIBLE_DEVICES=$GPU python scripts/rollout_replay_traj.py \
   --task_type robocasa \
   --ckpt_path "$CKPT" \
@@ -38,4 +56,4 @@ CUDA_VISIBLE_DEVICES=$GPU python scripts/rollout_replay_traj.py \
   --val_dataset_dir "dataset_example/$DS" \
   --data_stat_path "dataset_meta_info/$DS/stat.json" \
   --num_traj "$N" --out_dir "$OUT" \
-  --start_idx "$START_IDX" --seed "$SEED"
+  --start_idx "$START_IDX" --seed "$SEED" --gen_seed "${GEN_SEED:-$SEED}"
