@@ -82,6 +82,11 @@ class wm_args:
     use_temporal_action_encoder = os.environ.get('USE_TEMPORAL_ACTION_ENCODER', '0') == '1'
     temporal_action_layers = int(os.environ.get('TEMPORAL_ACTION_LAYERS', 4))
     temporal_action_heads = int(os.environ.get('TEMPORAL_ACTION_HEADS', 8))
+    # ---- Change B: action modulation ----
+    # When on, per-frame action tokens are projected (zero-init) and added onto the timestep
+    # embedding `emb` (a global bias into every ResNet block), a second route alongside
+    # cross-attention. No-op at init; composes with Change A. Toggle via env for ablation.
+    use_action_modulation = os.environ.get('USE_ACTION_MODULATION', '0') == '1'
     dtype = torch.bfloat16 # [torch.float32, torch.bfloat16] # during inference, we can use bfloat16 to accelerate the inference speed and save memory
 
 

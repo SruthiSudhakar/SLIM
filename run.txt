@@ -50,9 +50,12 @@ accelerate launch --multi_gpu --num_processes 8 --num_machines 1 \
 STEP 4 - EVALUATE A TRAINED CHECKPOINT (after training)  -- ctrl-world env
 ------------------------------------------------------------------------
 
-bash scripts/eval_ckpt.sh model_ckpt/big_baseline/checkpoint-1000.pt 2 robocasa_gr00t_rollouts 50 random 0
-bash scripts/eval_ckpt.sh model_ckpt/big_changeA/checkpoint-1000.pt 3 robocasa_gr00t_rollouts 50 random 0
-
+bash scripts/eval_ckpt.sh model_ckpt/big_changeB/checkpoint-5000.pt 0 \
+    --dataset robocasa_atomic_all \
+    --num_traj 36 \
+    --start_idx random \
+    --seed 0 \
+    --interact_num 24
 ------------------------------------------------------------------------
 STEP 5 - ACTION PROBING 
 ------------------------------------------------------------------------

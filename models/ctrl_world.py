@@ -143,7 +143,9 @@ class CrtlWorld(nn.Module):
         self.pipeline = StableVideoDiffusionPipeline.from_pretrained(args.svd_model_path)
         # repalce the unet to support frame_level pose condition
         print("replace the unet to support action condition and frame_level pose!")
-        unet = UNetSpatioTemporalConditionModel()
+        unet = UNetSpatioTemporalConditionModel(
+            use_action_modulation=getattr(args, 'use_action_modulation', False),  # Change B
+        )
         unet.load_state_dict(self.pipeline.unet.state_dict(), strict=False)
         self.pipeline.unet = unet
         

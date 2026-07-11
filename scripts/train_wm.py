@@ -69,7 +69,8 @@ def main(args):
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         allowed_new = ('action_encoder.temporal_encoder',
                        'action_encoder.action_time_pos',
-                       'action_encoder.temporal_zero_proj')
+                       'action_encoder.temporal_zero_proj',
+                       'unet.action_mod')  # Change B: action modulation (absent from older checkpoints)
         bad_missing = [k for k in missing if not k.startswith(allowed_new)]
         if missing:
             print(f"[warm-start] {len(missing)} missing key(s) kept at fresh init "

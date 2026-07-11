@@ -66,9 +66,11 @@ class agent():
         # carries the temporal action-encoder weights, build the model with that module.
         _state_dict = torch.load(args.val_model_path, map_location='cpu')
         _has_temporal = any(k.startswith('action_encoder.temporal_encoder') for k in _state_dict)
+        _has_action_mod = any(k.startswith('unet.action_mod') for k in _state_dict)  # Change B
         args.use_temporal_action_encoder = _has_temporal
-        print(f"[eval] checkpoint {'HAS' if _has_temporal else 'does NOT have'} temporal action encoder "
-              f"-> building model with use_temporal_action_encoder={_has_temporal}")
+        args.use_action_modulation = _has_action_mod
+        print(f"[eval] checkpoint: temporal_action_encoder={_has_temporal} action_modulation={_has_action_mod} "
+              f"-> building model to match")
         self.model = CrtlWorld(args)
         self.model.load_state_dict(_state_dict)  # strict: verifies arch matches exactly
         self.model.to(self.accelerator.device).to(self.dtype)

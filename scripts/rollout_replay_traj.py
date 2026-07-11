@@ -79,9 +79,11 @@ class agent():
         # carries the temporal action-encoder weights, build the model with that module.
         _state_dict = torch.load(args.val_model_path, map_location='cpu')
         _has_temporal = any(k.startswith('action_encoder.temporal_encoder') for k in _state_dict)
+        _has_action_mod = any(k.startswith('unet.action_mod') for k in _state_dict)  # Change B
         args.use_temporal_action_encoder = _has_temporal
-        print(f"[eval] checkpoint {'HAS' if _has_temporal else 'does NOT have'} temporal action encoder "
-              f"-> building model with use_temporal_action_encoder={_has_temporal}")
+        args.use_action_modulation = _has_action_mod
+        print(f"[eval] checkpoint: temporal_action_encoder={_has_temporal} action_modulation={_has_action_mod} "
+              f"-> building model to match")
         self.model = CrtlWorld(args)
         self.model.load_state_dict(_state_dict)  # strict: verifies arch matches exactly
         self.model.to(self.accelerator.device).to(self.dtype)
@@ -261,6 +263,9 @@ if __name__ == "__main__":
     parser.add_argument('--val_dataset_dir', type=str, default=None,
                         help="eval-set dir; val episode ids auto-discovered from its annotation/val/")
     parser.add_argument('--num_traj', type=int, default=None, help="limit number of val episodes")
+    parser.add_argument('--interact_num', type=int, default=None,
+                        help="autoregressive rollout steps per episode (overrides config). "
+                             "Rollout length in frames ~= (pred_step-1)*interact_num + 1.")
     parser.add_argument('--save_tag', type=str, default=None,
                         help="suffix on the output folder so parallel / other-checkpoint runs don't mix")
     parser.add_argument('--out_dir', type=str, default=None,
