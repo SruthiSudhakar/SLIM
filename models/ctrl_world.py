@@ -143,6 +143,11 @@ class CrtlWorld(nn.Module):
         self.pipeline = StableVideoDiffusionPipeline.from_pretrained(args.svd_model_path)
         # repalce the unet to support frame_level pose condition
         print("replace the unet to support action condition and frame_level pose!")
+        # Change C: patch the temporal cross-attention to attend over ALL per-frame action tokens.
+        # Global monkeypatch (class method) -> apply before any forward; no weights added.
+        if getattr(args, 'use_temporal_action_cond', False):
+            from models.change_c_temporal_patch import apply_full_temporal_action_context
+            apply_full_temporal_action_context()
         unet = UNetSpatioTemporalConditionModel(
             use_action_modulation=getattr(args, 'use_action_modulation', False),  # Change B
         )

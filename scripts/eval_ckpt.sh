@@ -74,6 +74,10 @@ done
 # gen_seed precedence: explicit flag > env GEN_SEED > SEED
 GEN_SEED="${GEN_SEED_ARG:-${GEN_SEED:-$SEED}}"
 
+# Change C (full temporal action context) is env-driven and NOT recorded in the checkpoint, so
+# record it in meta.json to self-document whether this eval ran with C on.
+[ "${USE_TEMPORAL_ACTION_COND:-0}" = "1" ] && USE_C=true || USE_C=false
+
 # store eval videos right next to the checkpoint, timestamped so runs don't clash:
 #   <ckpt_dir>/<ckpt_name>_eval_<timestamp>/
 OUT="$(dirname "$CKPT")/$(basename "$CKPT" .pt)_eval_$(date +%Y%m%d_%H%M%S)"
@@ -88,6 +92,7 @@ cat > "$OUT/meta.json" <<EOF
   "start_idx": "$START_IDX",
   "seed": $SEED,
   "gen_seed": $GEN_SEED,
+  "use_temporal_action_cond": $USE_C,
   "interact_num": ${INTERACT_NUM:-null},
   "gpu": "$GPU",
   "run_time": "$(date +%Y-%m-%d_%H:%M:%S)",

@@ -1,6 +1,12 @@
 #Todo 
 
-##July 7th:
+  cd /proj/vondrick3/sruthi/Appaji/SLIM/Ctrl-World                                                                
+  # atomic_all                                                                                                    
+  USE_TEMPORAL_ACTION_COND=1 bash scripts/eval_ckpt.sh model_ckpt/big_changeAC/checkpoint-5000.pt 0               
+  robocasa_atomic_all     36 random 0                                                                             
+  # gr00t                                                                                                         
+  USE_TEMPORAL_ACTION_COND=1 bash scripts/eval_ckpt.sh model_ckpt/big_changeAC/checkpoint-5000.pt 1               
+  robocasa_gr00t_rollouts 36 random 0
 
 
 3. see how the trained model is doing on failures vs successes. write a script to check MSE loss (and think of any other metrics that may be needed specific to seeing if task success/failure is faithful (like policy eval))

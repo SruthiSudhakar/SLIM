@@ -87,6 +87,12 @@ class wm_args:
     # embedding `emb` (a global bias into every ResNet block), a second route alongside
     # cross-attention. No-op at init; composes with Change A. Toggle via env for ablation.
     use_action_modulation = os.environ.get('USE_ACTION_MODULATION', '0') == '1'
+    # ---- Change C: full temporal action context ----
+    # When on, monkeypatches the temporal cross-attention to attend over ALL F per-frame action
+    # tokens instead of only frame 0's (fixes the [:,0] degeneracy). NO new params -> NOT
+    # checkpoint-detectable, so this env flag MUST be set at both train AND eval. Best paired
+    # with Change A (which makes the tokens trajectory-aware).
+    use_temporal_action_cond = os.environ.get('USE_TEMPORAL_ACTION_COND', '0') == '1'
     dtype = torch.bfloat16 # [torch.float32, torch.bfloat16] # during inference, we can use bfloat16 to accelerate the inference speed and save memory
 
 
