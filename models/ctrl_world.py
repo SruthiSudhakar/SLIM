@@ -165,6 +165,24 @@ class CrtlWorld(nn.Module):
         self.unet.requires_grad_(True)
         self.unet.enable_gradient_checkpointing()
 
+        # ---- LoRA: freeze base UNet, train only low-rank adapters on the attention projections ----
+        # For the few-shot new-concept comparison: USE_LORA=1 attaches a LoRA adapter and freezes the
+        # base UNet so only the adapter (+ the small action_encoder below) adapts to the new task.
+        # No-op unless args.use_lora. add_adapter() itself sets requires_grad=True on the lora_ params
+        # and False on the frozen base, so the optimizer (which filters on requires_grad) picks up only
+        # the adapter.
+        if getattr(args, 'use_lora', False):
+            from peft import LoraConfig
+            lora_config = LoraConfig(
+                r=args.lora_rank,
+                lora_alpha=args.lora_alpha,
+                init_lora_weights='gaussian',
+                target_modules=list(args.lora_targets),
+            )
+            self.unet.add_adapter(lora_config)
+            print(f"[LoRA] attached adapter r={args.lora_rank} alpha={args.lora_alpha} "
+                  f"targets={args.lora_targets}")
+
         # SVD is a img2video model, load a clip text encoder
         from transformers import AutoTokenizer, CLIPTextModelWithProjection
         self.text_encoder = CLIPTextModelWithProjection.from_pretrained(args.clip_model_path)

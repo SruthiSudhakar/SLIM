@@ -39,14 +39,16 @@ class wm_args:
 
 
     # training parameters
-    learning_rate= 1e-5 # 5e-6
+    # env-overridable so the full-FT and LoRA adaptation arms can use different LRs (LoRA typically
+    # wants a higher LR, e.g. 1e-4) without code edits; defaults to the original 1e-5.
+    learning_rate= float(os.environ.get('LEARNING_RATE', 1e-5)) # 5e-6
     # LR for the newly-added Change A params (temporal action encoder) only; base UNet stays at
     # learning_rate. Set ACTION_ENCODER_LR higher to speed the zero-init fade-in (faster
     # time-to-signal) without disturbing the warm-started UNet. Default = base LR (no change).
     action_encoder_lr = float(os.environ.get('ACTION_ENCODER_LR', learning_rate))
-    gradient_accumulation_steps = 1
+    gradient_accumulation_steps = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
     mixed_precision = 'fp16'
-    train_batch_size = 4
+    train_batch_size = int(os.environ.get('TRAIN_BATCH_SIZE', 4))
     shuffle = True
     num_train_epochs = 100
     # Schedule knobs are env-overridable so fast ablation screening (short runs, light
@@ -64,7 +66,9 @@ class wm_args:
     motion_bucket_id = 127
     fps = 7
     guidance_scale = 1.0 #2.0 #7.5 #7.5 #7.5 #3.0
-    num_inference_steps = 50
+    # env-overridable so eval can trade fidelity for speed (fewer denoising steps = faster rollout);
+    # keep it the SAME across all checkpoints/arms you compare so the comparison stays fair.
+    num_inference_steps = int(os.environ.get('NUM_INFERENCE_STEPS', 50))
     decode_chunk_size = 7
     width = 320
     height = 192
@@ -93,6 +97,16 @@ class wm_args:
     # checkpoint-detectable, so this env flag MUST be set at both train AND eval. Best paired
     # with Change A (which makes the tokens trajectory-aware).
     use_temporal_action_cond = os.environ.get('USE_TEMPORAL_ACTION_COND', '0') == '1'
+    # ---- LoRA finetuning (few-shot new-concept adaptation) ----
+    # When on, a LoRA adapter is attached to the UNet attention projections and ONLY the LoRA
+    # params (+ the small action_encoder) are trained; the base UNet stays frozen. Off by default
+    # -> full finetuning (existing behavior) is unchanged. Toggle via env for the full-FT vs LoRA
+    # comparison. Checkpoints are saved merged (base+LoRA) so eval needs no changes.
+    use_lora = os.environ.get('USE_LORA', '0') == '1'
+    lora_rank = int(os.environ.get('LORA_RANK', 16))
+    lora_alpha = int(os.environ.get('LORA_ALPHA', 16))
+    # attention q/k/v/out projections; comma-separated env override, e.g. "to_q,to_k,to_v,to_out.0,ff.net.0.proj"
+    lora_targets = os.environ.get('LORA_TARGETS', 'to_q,to_k,to_v,to_out.0').split(',')
     dtype = torch.bfloat16 # [torch.float32, torch.bfloat16] # during inference, we can use bfloat16 to accelerate the inference speed and save memory
 
 

@@ -41,7 +41,13 @@ N=1
 START_IDX=0
 SEED=0
 INTERACT_NUM=""   # empty -> don't pass to python -> config.py default wins
+DATA_STAT=""      # empty -> default to dataset_meta_info/$DS/stat.json (set via --data_stat to override,
+                  # e.g. eval a base on another dataset using the base's TRAINING normalization)
 GEN_SEED_ARG=""   # empty -> fall back to env GEN_SEED, then to SEED
+SELECT_SUCCESS="" # --select_by_success -> per task, n_success + n_fail episodes from train+val
+N_SUCCESS=""      # episodes/task with success=1 (default 5 in python)
+N_FAIL=""         # episodes/task with success=0 (default 5 in python)
+TASK=""           # --task -> restrict --select_by_success to a single task
 
 # support mixed positional + named:
 #   positional order (after ckpt/gpu): dataset, num_traj, start_idx, seed, interact_num
@@ -54,6 +60,11 @@ while [ $# -gt 0 ]; do
     --seed)                       SEED="$2";         shift 2;;
     --interact_num)               INTERACT_NUM="$2"; shift 2;;
     --gen_seed)                   GEN_SEED_ARG="$2"; shift 2;;
+    --data_stat|--data_stat_path) DATA_STAT="$2";    shift 2;;
+    --select_by_success)          SELECT_SUCCESS=1;  shift 1;;
+    --n_success)                  N_SUCCESS="$2";    shift 2;;
+    --n_fail)                     N_FAIL="$2";       shift 2;;
+    --task)                       TASK="$2";         shift 2;;
     --) shift; break;;
     --*)
       echo "Unknown flag: $1" >&2; exit 1;;
@@ -74,9 +85,23 @@ done
 # gen_seed precedence: explicit flag > env GEN_SEED > SEED
 GEN_SEED="${GEN_SEED_ARG:-${GEN_SEED:-$SEED}}"
 
+# stat path: explicit --data_stat wins, else the eval dataset's own stat.json
+DATA_STAT="${DATA_STAT:-dataset_meta_info/$DS/stat.json}"
+
+# diffusion denoising steps (env NUM_INFERENCE_STEPS, config.py default 50); recorded in meta.json
+# so evals run at different step counts are self-documenting.
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-50}"
+
 # Change C (full temporal action context) is env-driven and NOT recorded in the checkpoint, so
 # record it in meta.json to self-document whether this eval ran with C on.
 [ "${USE_TEMPORAL_ACTION_COND:-0}" = "1" ] && USE_C=true || USE_C=false
+
+# record the per-task success/failure selection in meta.json (n_* default to 5 in python when unset)
+if [ -n "$SELECT_SUCCESS" ]; then
+  SEL_META=true;  NS_META=${N_SUCCESS:-5};  NF_META=${N_FAIL:-5}
+else
+  SEL_META=false; NS_META=null;             NF_META=null
+fi
 
 # store eval videos right next to the checkpoint, timestamped so runs don't clash:
 #   <ckpt_dir>/<ckpt_name>_eval_<timestamp>/
@@ -92,7 +117,13 @@ cat > "$OUT/meta.json" <<EOF
   "start_idx": "$START_IDX",
   "seed": $SEED,
   "gen_seed": $GEN_SEED,
+  "data_stat_path": "$DATA_STAT",
+  "num_inference_steps": $NUM_INFERENCE_STEPS,
   "use_temporal_action_cond": $USE_C,
+  "select_by_success": $SEL_META,
+  "n_success": $NS_META,
+  "n_fail": $NF_META,
+  "task": $([ -n "$TASK" ] && echo "\"$TASK\"" || echo null),
   "interact_num": ${INTERACT_NUM:-null},
   "gpu": "$GPU",
   "run_time": "$(date +%Y-%m-%d_%H:%M:%S)",
@@ -111,6 +142,15 @@ if [ -n "$INTERACT_NUM" ]; then
   INTERACT_ARGS=(--interact_num "$INTERACT_NUM")
 fi
 
+# per-task success/failure selection (from train+val); overrides --num_traj
+SELECT_ARGS=()
+if [ -n "$SELECT_SUCCESS" ]; then
+  SELECT_ARGS=(--select_by_success)
+  [ -n "$N_SUCCESS" ] && SELECT_ARGS+=(--n_success "$N_SUCCESS")
+  [ -n "$N_FAIL" ]    && SELECT_ARGS+=(--n_fail "$N_FAIL")
+  [ -n "$TASK" ]      && SELECT_ARGS+=(--task "$TASK")
+fi
+
 CUDA_VISIBLE_DEVICES=$GPU python scripts/rollout_replay_traj.py \
   --task_type robocasa \
   --ckpt_path "$CKPT" \
@@ -118,7 +158,7 @@ CUDA_VISIBLE_DEVICES=$GPU python scripts/rollout_replay_traj.py \
   --dataset_root_path dataset_example --dataset_meta_info_path dataset_meta_info \
   --dataset_names "$DS" \
   --val_dataset_dir "dataset_example/$DS" \
-  --data_stat_path "dataset_meta_info/$DS/stat.json" \
+  --data_stat_path "$DATA_STAT" \
   --num_traj "$N" --out_dir "$OUT" \
   --start_idx "$START_IDX" --seed "$SEED" --gen_seed "$GEN_SEED" \
-  "${INTERACT_ARGS[@]}"
+  "${INTERACT_ARGS[@]}" "${SELECT_ARGS[@]}"

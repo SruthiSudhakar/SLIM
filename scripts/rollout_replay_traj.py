@@ -112,7 +112,8 @@ class agent():
         args = self.args
         skip = args.skip_step
         num_frames = steps
-        annotation_path = f"{val_dataset_dir}/annotation/val/{id}.json"
+        _amap = getattr(args, '_anno_path_map', None)
+        annotation_path = _amap[id] if (_amap and id in _amap) else f"{val_dataset_dir}/annotation/val/{id}.json"
         with open(annotation_path) as f:
             anno = json.load(f)
             try:
@@ -131,38 +132,47 @@ class agent():
         joint_pos = np.array(anno['joints'])
         joint_pos = joint_pos[frames_ids]
 
-        # get videos
+        # get videos (per camera view)
+        device = self.device
         video_dict =[]
         video_latent = []
         for id in range(len(anno['videos'])):
-            video_path = anno['videos'][id]['video_path']
-            video_path = f"{val_dataset_dir}/{video_path}"
-            # load videos from all views
-            vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
-            try:
-                true_video = vr.get_batch(range(length)).asnumpy()
-            except:
-                true_video = vr.get_batch(range(length)).numpy()
-            true_video = true_video[frames_ids]
-            video_dict.append(true_video)
+            video_path = f"{val_dataset_dir}/{anno['videos'][id]['video_path']}"
+            if os.path.exists(video_path):
+                # ---- raw-video path (unchanged): read mp4, then VAE-encode ----
+                vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
+                try:
+                    true_video = vr.get_batch(range(length)).asnumpy()
+                except:
+                    true_video = vr.get_batch(range(length)).numpy()
+                true_video = true_video[frames_ids]
+                video_dict.append(true_video)
 
-            # encode video
-            device = self.device
-            true_video = torch.from_numpy(true_video).to(self.dtype).to(device)
-            x = true_video.permute(0,3,1,2).to(device) / 255.0*2-1
-            vae = self.model.pipeline.vae
-            with torch.no_grad():
-                batch_size = 32
-                latents = []
-                for i in range(0, len(x), batch_size):
-                    batch = x[i:i+batch_size]
-                    latent = vae.encode(batch).latent_dist.sample().mul_(vae.config.scaling_factor)
-                    latents.append(latent)
-                x = torch.cat(latents, dim=0)
-    
-            video_latent.append(x)
+                # encode video
+                true_video = torch.from_numpy(true_video).to(self.dtype).to(device)
+                x = true_video.permute(0,3,1,2).to(device) / 255.0*2-1
+                vae = self.model.pipeline.vae
+                with torch.no_grad():
+                    batch_size = 32
+                    latents = []
+                    for i in range(0, len(x), batch_size):
+                        batch = x[i:i+batch_size]
+                        latent = vae.encode(batch).latent_dist.sample().mul_(vae.config.scaling_factor)
+                        latents.append(latent)
+                    x = torch.cat(latents, dim=0)
+                video_latent.append(x)
+            else:
+                # ---- fallback: raw video missing (e.g. gr00t train), load the PRECOMPUTED latent ----
+                # (stored .pt is already scaled the same way as the encode path above; same format
+                # the model trained on). video_dict is only used for a dead var, so use a placeholder.
+                lat_rel = anno['latent_videos'][id]['latent_video_path']
+                lat = torch.load(f"{val_dataset_dir}/{lat_rel}", map_location='cpu')
+                lat.requires_grad = False
+                fids = [min(int(fi), lat.shape[0]-1) for fi in frames_ids]
+                x = lat[fids].to(self.dtype).to(device)   # [T, 4, 24, 40]
+                video_latent.append(x)
+                video_dict.append(x)  # placeholder (only feeds the unused `video_first`)
 
-        
         return car_action, joint_pos, video_dict, video_latent, instruction
 
     def forward_wm(self, action_cond, video_latent_true, video_latent_cond, his_cond=None, text=None, gen_seed=None):
@@ -278,6 +288,14 @@ if __name__ == "__main__":
     parser.add_argument('--gen_seed', type=int, default=None,
                         help="seed for the diffusion SAMPLING noise, so baseline vs Change A are generated "
                              "under identical noise (paired). None -> unseeded. Use the SAME value for both models.")
+    parser.add_argument('--select_by_success', action='store_true',
+                        help="select eval episodes per task = n_success success + n_fail failure rollouts, "
+                             "drawn from BOTH annotation/train and annotation/val (uses the 'success' field "
+                             "in each annotation). Overrides --num_traj.")
+    parser.add_argument('--n_success', type=int, default=5, help="success episodes per task (with --select_by_success)")
+    parser.add_argument('--n_fail', type=int, default=5, help="failure episodes per task (with --select_by_success)")
+    parser.add_argument('--task', type=str, default=None,
+                        help="restrict --select_by_success to a single task (e.g. PickPlaceSinkToCounter)")
     args_new = parser.parse_args()
 
     args = wm_args(task_type=args_new.task_type)
@@ -300,7 +318,9 @@ if __name__ == "__main__":
     _span = int(args.pred_step * args.interact_num + 8) * args.skip_step
 
     def _episode_length(vid):
-        with open(f"{args.val_dataset_dir}/annotation/val/{vid}.json") as f:
+        _amap = getattr(args, '_anno_path_map', None)
+        _p = _amap[vid] if (_amap and vid in _amap) else f"{args.val_dataset_dir}/annotation/val/{vid}.json"
+        with open(_p) as f:
             anno = json.load(f)
         try:
             return len(anno['action'])
@@ -316,7 +336,52 @@ if __name__ == "__main__":
             return _random.randint(0, hi)
         return int(args_new.start_idx)
 
-    if args_new.val_dataset_dir is not None:
+    if args_new.select_by_success and args.val_dataset_dir is not None:
+        # Per task: n_success success + n_fail failure rollouts, drawn from train+val combined.
+        # Task = filename prefix before the first _<digit>; success = the annotation's 'success' field
+        # (read from the file head only, so we don't parse the big state arrays for every candidate).
+        import re as _re
+        root = args.val_dataset_dir
+        def _task_success(p):
+            # task = first '_'-delimited token; robocasa task names are CamelCase with no '_' or
+            # digits, so this handles BOTH gr00t ids ('PickPlaceSinkToCounter_14_50_...') and atomic
+            # ids ('CloseFridge__ep000000'). (The old '^(.+?)_\d' regex only matched gr00t ids.)
+            task = os.path.basename(p).split('_')[0]
+            with open(p) as f:
+                head = f.read(4096)
+            sm = _re.search(r'"success"\s*:\s*(\d+)', head)
+            return task, (int(sm.group(1)) if sm else None)
+        paths = (_glob.glob(os.path.join(root, "annotation", "train", "*.json")) +
+                 _glob.glob(os.path.join(root, "annotation", "val", "*.json")))
+        by_task = {}
+        for p in paths:
+            task, succ = _task_success(p)
+            if succ is None:
+                continue
+            if args_new.task and task != args_new.task:  # --task: restrict to one task
+                continue
+            eid = os.path.basename(p)[:-5]
+            by_task.setdefault(task, {1: [], 0: []})[1 if succ == 1 else 0].append((eid, p))
+        if args_new.task and not by_task:
+            raise SystemExit(f"--task {args_new.task}: no annotations found under {root}/annotation/*/")
+        val_id, anno_map, success_map = [], {}, {}
+        for task in sorted(by_task):
+            for label, n in [(1, args_new.n_success), (0, args_new.n_fail)]:
+                pool = sorted(by_task[task][label])
+                _random.shuffle(pool)
+                picked = pool[:n]
+                if len(picked) < n:
+                    print(f"  WARN task {task} {'success' if label else 'fail'}: only {len(picked)}/{n} available")
+                for eid, p in picked:
+                    val_id.append(eid); anno_map[eid] = p; success_map[eid] = label
+        args.val_id = val_id
+        args._anno_path_map = anno_map      # get_traj_info / _episode_length read annotations via this
+        args._success_map = success_map
+        args.start_idx = [_start_for(vid) for vid in val_id]
+        args.instruction = [""] * len(val_id)
+        print(f"select_by_success: {len(val_id)} episodes ({args_new.n_success} succ + {args_new.n_fail} fail "
+              f"per task, {len(by_task)} tasks) drawn from train+val")
+    elif args_new.val_dataset_dir is not None:
         ids = sorted(os.path.basename(p)[:-5]
                      for p in _glob.glob(os.path.join(args.val_dataset_dir, "annotation", "val", "*.json")))
         if args_new.num_traj is not None:
@@ -440,6 +505,7 @@ if __name__ == "__main__":
 
         rollout_metrics.append({
             'traj_id': str(val_id_i), 'start_idx': int(start_idx_i),
+            'success': getattr(args, '_success_map', {}).get(val_id_i),  # 1/0 (None if not selected by success)
             'num_frames': len(traj_psnr),
             'mean_psnr': float(np.mean(traj_psnr)) if traj_psnr else 0.0,
             'mean_mse': float(np.mean(traj_mse)) if traj_mse else 0.0,
@@ -463,6 +529,14 @@ if __name__ == "__main__":
             'psnr_per_frame': psnr_curve,
             'mse_per_frame': mse_curve,
         }
+        # breakdown by success/failure (when episodes were selected with --select_by_success)
+        if any(m.get('success') is not None for m in rollout_metrics):
+            for lab, name in [(1, 'success'), (0, 'failure')]:
+                sub = [m for m in rollout_metrics if m.get('success') == lab]
+                if sub:
+                    summary[f'n_{name}'] = len(sub)
+                    summary[f'mean_psnr_{name}'] = float(np.mean([m['mean_psnr'] for m in sub]))
+                    summary[f'mean_mse_{name}'] = float(np.mean([m['mean_mse'] for m in sub]))
         metrics_path = os.path.join(_outdir, 'rollout_metrics.json')
         os.makedirs(_outdir, exist_ok=True)
         with open(metrics_path, 'w') as f:
@@ -474,6 +548,12 @@ if __name__ == "__main__":
         print(f"  mean PSNR (dB, higher=better) : {summary['mean_psnr']:.3f}")
         print(f"  mean MSE  (lower=better)      : {summary['mean_mse']:.2f}")
         print(f"  PSNR first->last frame        : {psnr_curve[0]:.2f} -> {psnr_curve[-1]:.2f}  (drift over rollout)")
+        if 'mean_psnr_success' in summary or 'mean_psnr_failure' in summary:
+            print("  --- by outcome ---")
+            if 'mean_psnr_success' in summary:
+                print(f"  SUCCESS (n={summary.get('n_success')}): PSNR {summary['mean_psnr_success']:.3f}  MSE {summary['mean_mse_success']:.1f}")
+            if 'mean_psnr_failure' in summary:
+                print(f"  FAILURE (n={summary.get('n_failure')}): PSNR {summary['mean_psnr_failure']:.3f}  MSE {summary['mean_mse_failure']:.1f}")
         print(f"  wrote {metrics_path}")
         print("=================================")
 

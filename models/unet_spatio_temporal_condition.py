@@ -6,6 +6,11 @@ import torch.nn as nn
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import UNet2DConditionLoadersMixin
+# PeftAdapterMixin gives add_adapter / merge_adapter / unmerge_adapter so we can attach a LoRA
+# adapter to this UNet (this class inherits ModelMixin but not PeftAdapterMixin by default).
+# It is inert unless add_adapter() is called (i.e. USE_LORA=1), so it does not affect the
+# default UNet forward or weights.
+from diffusers.loaders.peft import PeftAdapterMixin
 from diffusers.utils import BaseOutput, logging
 from diffusers.models.attention_processor import CROSS_ATTENTION_PROCESSORS, AttentionProcessor, AttnProcessor
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
@@ -29,7 +34,7 @@ class UNetSpatioTemporalConditionOutput(BaseOutput):
     sample: torch.Tensor = None
 
 
-class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
+class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, PeftAdapterMixin):
     r"""
     A conditional Spatio-Temporal UNet model that takes a noisy video frames, conditional state, and a timestep and
     returns a sample shaped output.
