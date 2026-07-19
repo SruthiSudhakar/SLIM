@@ -34,22 +34,31 @@ class wm_args:
     tag = os.environ.get('RUN_TAG', 'robocasa_opendrawer')  # was 'doird_subset'
     output_dir = f"model_ckpt/{tag}"
     wandb_run_name = tag
-    wandb_project_name = "robocasa_opendrawer"
+    # WANDB_PROJECT env routes runs to a named wandb project (creds read from ~/.netrc).
+    wandb_project_name = os.environ.get('WANDB_PROJECT', "robocasa_opendrawer")
 
 
     # training parameters
-    learning_rate= 1e-5 # 5e-6
-    gradient_accumulation_steps = 1
+    # env-overridable so the full-FT and LoRA adaptation arms can use different LRs (LoRA typically
+    # wants a higher LR, e.g. 1e-4) without code edits; defaults to the original 1e-5.
+    learning_rate= float(os.environ.get('LEARNING_RATE', 1e-5)) # 5e-6
+    # LR for the newly-added Change A params (temporal action encoder) only; base UNet stays at
+    # learning_rate. Set ACTION_ENCODER_LR higher to speed the zero-init fade-in (faster
+    # time-to-signal) without disturbing the warm-started UNet. Default = base LR (no change).
+    action_encoder_lr = float(os.environ.get('ACTION_ENCODER_LR', learning_rate))
+    gradient_accumulation_steps = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
     mixed_precision = 'fp16'
-    train_batch_size = 4
+    train_batch_size = int(os.environ.get('TRAIN_BATCH_SIZE', 4))
     shuffle = True
     num_train_epochs = 100
-    max_train_steps = 30000       # short single-task adaptation from pretrained (was 500000)
-    checkpointing_steps = 5000    # was 20000
-    validation_steps = 1000       # video samples every 1k (was 2500)
+    # Schedule knobs are env-overridable so fast ablation screening (short runs, light
+    # validation) needs no code edits; defaults reproduce the normal single-task run.
+    max_train_steps = int(os.environ.get('MAX_TRAIN_STEPS', 30000))       # short single-task adaptation from pretrained (was 500000)
+    checkpointing_steps = int(os.environ.get('CHECKPOINTING_STEPS', 5000))    # was 20000
+    validation_steps = int(os.environ.get('VALIDATION_STEPS', 1000))       # video samples every 1k (was 2500)
     max_grad_norm = 1.0
     # for val
-    video_num= 10
+    video_num= int(os.environ.get('VIDEO_NUM', 10))
 
     ############################ model args ##############################
 
@@ -57,7 +66,9 @@ class wm_args:
     motion_bucket_id = 127
     fps = 7
     guidance_scale = 1.0 #2.0 #7.5 #7.5 #7.5 #3.0
-    num_inference_steps = 50
+    # env-overridable so eval can trade fidelity for speed (fewer denoising steps = faster rollout);
+    # keep it the SAME across all checkpoints/arms you compare so the comparison stays fair.
+    num_inference_steps = int(os.environ.get('NUM_INFERENCE_STEPS', 50))
     decode_chunk_size = 7
     width = 320
     height = 192
@@ -68,6 +79,34 @@ class wm_args:
     text_cond = True
     frame_level_cond = True
     his_cond_zero = False
+    # ---- Change A: temporal action encoder ----
+    # When on, the per-frame action MLP is followed by a 4-layer temporal transformer
+    # (residual, zero-init -> no-op at start) so action tokens become trajectory-aware.
+    # Toggle via env for ablation screening; requires frame_level_cond=True.
+    use_temporal_action_encoder = os.environ.get('USE_TEMPORAL_ACTION_ENCODER', '0') == '1'
+    temporal_action_layers = int(os.environ.get('TEMPORAL_ACTION_LAYERS', 4))
+    temporal_action_heads = int(os.environ.get('TEMPORAL_ACTION_HEADS', 8))
+    # ---- Change B: action modulation ----
+    # When on, per-frame action tokens are projected (zero-init) and added onto the timestep
+    # embedding `emb` (a global bias into every ResNet block), a second route alongside
+    # cross-attention. No-op at init; composes with Change A. Toggle via env for ablation.
+    use_action_modulation = os.environ.get('USE_ACTION_MODULATION', '0') == '1'
+    # ---- Change C: full temporal action context ----
+    # When on, monkeypatches the temporal cross-attention to attend over ALL F per-frame action
+    # tokens instead of only frame 0's (fixes the [:,0] degeneracy). NO new params -> NOT
+    # checkpoint-detectable, so this env flag MUST be set at both train AND eval. Best paired
+    # with Change A (which makes the tokens trajectory-aware).
+    use_temporal_action_cond = os.environ.get('USE_TEMPORAL_ACTION_COND', '0') == '1'
+    # ---- LoRA finetuning (few-shot new-concept adaptation) ----
+    # When on, a LoRA adapter is attached to the UNet attention projections and ONLY the LoRA
+    # params (+ the small action_encoder) are trained; the base UNet stays frozen. Off by default
+    # -> full finetuning (existing behavior) is unchanged. Toggle via env for the full-FT vs LoRA
+    # comparison. Checkpoints are saved merged (base+LoRA) so eval needs no changes.
+    use_lora = os.environ.get('USE_LORA', '0') == '1'
+    lora_rank = int(os.environ.get('LORA_RANK', 16))
+    lora_alpha = int(os.environ.get('LORA_ALPHA', 16))
+    # attention q/k/v/out projections; comma-separated env override, e.g. "to_q,to_k,to_v,to_out.0,ff.net.0.proj"
+    lora_targets = os.environ.get('LORA_TARGETS', 'to_q,to_k,to_v,to_out.0').split(',')
     dtype = torch.bfloat16 # [torch.float32, torch.bfloat16] # during inference, we can use bfloat16 to accelerate the inference speed and save memory
 
 

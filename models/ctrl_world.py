@@ -69,7 +69,8 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     return emb
 
 class Action_encoder2(nn.Module):
-    def __init__(self, action_dim, action_num, hidden_size, text_cond=True):
+    def __init__(self, action_dim, action_num, hidden_size, text_cond=True,
+                 use_temporal_encoder=False, temporal_layers=4, temporal_heads=8):
         super().__init__()
         self.action_dim = action_dim
         self.action_num = action_num
@@ -88,12 +89,37 @@ class Action_encoder2(nn.Module):
         nn.init.kaiming_normal_(self.action_encode[0].weight, mode='fan_in', nonlinearity='relu')
         nn.init.kaiming_normal_(self.action_encode[2].weight, mode='fan_in', nonlinearity='relu')
 
+        # ---- Change A: temporal action encoder (trajectory-aware action tokens) ----
+        # The per-frame MLP above encodes each action in isolation. This optional block
+        # mixes the T per-frame tokens along time so each token carries trajectory context
+        # (velocity, upcoming motion). It is wired as a RESIDUAL with a ZERO-INIT output
+        # projection so at init the whole block is an exact no-op: forward() returns exactly
+        # the MLP output, identical to the pre-change model. This lets it be warm-started on
+        # an existing checkpoint without a step-0 shock; the contribution fades in during
+        # training. Only meaningful with frame_level_cond=True (needs the T per-frame tokens).
+        self.use_temporal_encoder = use_temporal_encoder
+        if use_temporal_encoder:
+            self.action_time_pos = nn.Parameter(torch.zeros(1, int(action_num), 1024))
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=1024, nhead=temporal_heads, dim_feedforward=2048,
+                dropout=0.0, activation='gelu', batch_first=True, norm_first=True)
+            self.temporal_encoder = nn.TransformerEncoder(enc_layer, num_layers=temporal_layers)
+            self.temporal_zero_proj = nn.Linear(1024, 1024)
+            nn.init.zeros_(self.temporal_zero_proj.weight)
+            nn.init.zeros_(self.temporal_zero_proj.bias)
+
     def forward(self, action,  texts=None, text_tokinizer=None, text_encoder=None, frame_level_cond=True,):
         # action: (B, action_num, action_dim)
         B,T,D = action.shape
         if not frame_level_cond:
             action = einops.rearrange(action, 'b t d -> b 1 (t d)')
         action = self.action_encode(action)
+
+        # Change A: fold in trajectory context (residual, zero at init -> no-op unless trained).
+        if self.use_temporal_encoder and frame_level_cond:
+            x = action + self.action_time_pos[:, :action.shape[1]]
+            x = self.temporal_encoder(x)
+            action = action + self.temporal_zero_proj(x)
 
         if texts is not None and self.text_cond:
             # with 50% probability, add text condition
@@ -117,7 +143,14 @@ class CrtlWorld(nn.Module):
         self.pipeline = StableVideoDiffusionPipeline.from_pretrained(args.svd_model_path)
         # repalce the unet to support frame_level pose condition
         print("replace the unet to support action condition and frame_level pose!")
-        unet = UNetSpatioTemporalConditionModel()
+        # Change C: patch the temporal cross-attention to attend over ALL per-frame action tokens.
+        # Global monkeypatch (class method) -> apply before any forward; no weights added.
+        if getattr(args, 'use_temporal_action_cond', False):
+            from models.change_c_temporal_patch import apply_full_temporal_action_context
+            apply_full_temporal_action_context()
+        unet = UNetSpatioTemporalConditionModel(
+            use_action_modulation=getattr(args, 'use_action_modulation', False),  # Change B
+        )
         unet.load_state_dict(self.pipeline.unet.state_dict(), strict=False)
         self.pipeline.unet = unet
         
@@ -132,6 +165,24 @@ class CrtlWorld(nn.Module):
         self.unet.requires_grad_(True)
         self.unet.enable_gradient_checkpointing()
 
+        # ---- LoRA: freeze base UNet, train only low-rank adapters on the attention projections ----
+        # For the few-shot new-concept comparison: USE_LORA=1 attaches a LoRA adapter and freezes the
+        # base UNet so only the adapter (+ the small action_encoder below) adapts to the new task.
+        # No-op unless args.use_lora. add_adapter() itself sets requires_grad=True on the lora_ params
+        # and False on the frozen base, so the optimizer (which filters on requires_grad) picks up only
+        # the adapter.
+        if getattr(args, 'use_lora', False):
+            from peft import LoraConfig
+            lora_config = LoraConfig(
+                r=args.lora_rank,
+                lora_alpha=args.lora_alpha,
+                init_lora_weights='gaussian',
+                target_modules=list(args.lora_targets),
+            )
+            self.unet.add_adapter(lora_config)
+            print(f"[LoRA] attached adapter r={args.lora_rank} alpha={args.lora_alpha} "
+                  f"targets={args.lora_targets}")
+
         # SVD is a img2video model, load a clip text encoder
         from transformers import AutoTokenizer, CLIPTextModelWithProjection
         self.text_encoder = CLIPTextModelWithProjection.from_pretrained(args.clip_model_path)
@@ -139,7 +190,15 @@ class CrtlWorld(nn.Module):
         self.text_encoder.requires_grad_(False)
 
         # initialize an action projector
-        self.action_encoder = Action_encoder2(action_dim=args.action_dim, action_num=int(args.num_history+args.num_frames), hidden_size=1024, text_cond=args.text_cond)
+        self.action_encoder = Action_encoder2(
+            action_dim=args.action_dim,
+            action_num=int(args.num_history+args.num_frames),
+            hidden_size=1024,
+            text_cond=args.text_cond,
+            use_temporal_encoder=getattr(args, 'use_temporal_action_encoder', False),
+            temporal_layers=getattr(args, 'temporal_action_layers', 4),
+            temporal_heads=getattr(args, 'temporal_action_heads', 8),
+        )
 
     
 

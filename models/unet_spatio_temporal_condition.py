@@ -6,6 +6,11 @@ import torch.nn as nn
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import UNet2DConditionLoadersMixin
+# PeftAdapterMixin gives add_adapter / merge_adapter / unmerge_adapter so we can attach a LoRA
+# adapter to this UNet (this class inherits ModelMixin but not PeftAdapterMixin by default).
+# It is inert unless add_adapter() is called (i.e. USE_LORA=1), so it does not affect the
+# default UNet forward or weights.
+from diffusers.loaders.peft import PeftAdapterMixin
 from diffusers.utils import BaseOutput, logging
 from diffusers.models.attention_processor import CROSS_ATTENTION_PROCESSORS, AttentionProcessor, AttnProcessor
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
@@ -29,7 +34,7 @@ class UNetSpatioTemporalConditionOutput(BaseOutput):
     sample: torch.Tensor = None
 
 
-class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
+class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, PeftAdapterMixin):
     r"""
     A conditional Spatio-Temporal UNet model that takes a noisy video frames, conditional state, and a timestep and
     returns a sample shaped output.
@@ -93,10 +98,12 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
         num_attention_heads: Union[int, Tuple[int]] = (5, 10, 20, 20),
         num_frames: int = 25,
+        use_action_modulation: bool = False,
     ):
         super().__init__()
 
         self.sample_size = sample_size
+        self.use_action_modulation = use_action_modulation
 
         # Check inputs
         if len(down_block_types) != len(up_block_types):
@@ -142,6 +149,17 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         self.add_time_proj = Timesteps(addition_time_embed_dim, True, downscale_freq_shift=0)
         self.add_embedding = TimestepEmbedding(projection_class_embeddings_input_dim, time_embed_dim)
+
+        # ---- Change B: action modulation into the timestep pathway ----
+        # Project the per-frame action tokens to the timestep-embedding dim and ADD them onto `emb`
+        # (the vector added into every ResNet block). Gives the action a second, GLOBAL route on top
+        # of cross-attention. ZERO-INIT + bias-free => exact no-op at init (warm-start safe) AND
+        # action_mod(0)=0, so the CFG unconditional pass (zeroed encoder_hidden_states) gets no
+        # modulation for free. Self-contained here: reads encoder_hidden_states, no pipeline changes.
+        if self.use_action_modulation:
+            _ca_dim = cross_attention_dim[0] if isinstance(cross_attention_dim, (list, tuple)) else cross_attention_dim
+            self.action_mod = nn.Linear(_ca_dim, time_embed_dim, bias=False)
+            nn.init.zeros_(self.action_mod.weight)
 
         self.down_blocks = nn.ModuleList([])
         self.up_blocks = nn.ModuleList([])
@@ -446,6 +464,13 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         else:
             encoder_hidden_states = encoder_hidden_states.reshape(batch_size * num_frames, -1, encoder_hidden_states.shape[-1])
         ############################################################################################################################
+
+        # Change B: add per-frame action modulation onto the timestep embedding `emb` (both are
+        # [B*F, ...] and per-frame aligned). Zero-init -> no-op until trained; unconditional CFG
+        # pass (zeroed encoder_hidden_states) -> action_mod(0)=0, so no special handling needed.
+        if self.use_action_modulation:
+            act = encoder_hidden_states.mean(dim=1)          # [B*F, S, C] -> [B*F, C] (S=1 here)
+            emb = emb + self.action_mod(act.to(emb.dtype))
 
         # 2. pre-process
         sample = self.conv_in(sample)

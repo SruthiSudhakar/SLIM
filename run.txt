@@ -24,7 +24,15 @@ CUDA_VISIBLE_DEVICES=0 /proj/vondrick3/sruthi/miniconda3/envs/robocasa_dp/bin/py
 ------------------------------------------------------------------------
 STEP 3 -- POST-TRAIN on ALL-TASK demos + policy rollouts COMBINED
 ------------------------------------------------------------------------
-export RUN_TAG="robocasa_alltask_demo_plus_gr00t_$(date +%Y%m%d_%H%M%S)"
+env vars to set:
+RUN_TAG="robocasa_alltask_demo_plus_gr00t_$(date +%Y%m%d_%H%M%S)"
+USE_TEMPORAL_ACTION_ENCODER=1           # whether to use action encoder
+ACTION_ENCODER_LR=1e-4                  # action encoder learning rate
+MAX_TRAIN_STEPS=2000                    # number of training steps
+CHECKPOINTING_STEPS=250                 # checkpointing steps
+VALIDATION_STEPS=250                    # validation steps
+VIDEO_NUM=3                             # number of val videos
+
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 WANDB_MODE=online SWANLAB_MODE=disabled \
 accelerate launch --multi_gpu --num_processes 8 --num_machines 1 \
   --mixed_precision fp16 --main_process_port 29501 scripts/train_wm.py \
@@ -42,12 +50,20 @@ accelerate launch --multi_gpu --num_processes 8 --num_machines 1 \
 STEP 4 - EVALUATE A TRAINED CHECKPOINT (after training)  -- ctrl-world env
 ------------------------------------------------------------------------
 
-bash scripts/eval_ckpt.sh /proj/vondrick3/sruthi/Appaji/SLIM/Ctrl-World/model_ckpt/robocasa_opendrawer_20260702_130917/checkpoint-45000.pt 0 robocasa_atomic_all 10 random 0
+bash scripts/eval_ckpt.sh model_ckpt/big_changeB/checkpoint-5000.pt 0 \
+    --dataset robocasa_atomic_all \
+    --num_traj 36 \
+    --start_idx random \
+    --seed 0 \
+    --interact_num 24
+------------------------------------------------------------------------
+STEP 5 - ACTION PROBING 
+------------------------------------------------------------------------
 
-# Output -> synthetic_traj/Rollouts_robocasa_<rundir>__<checkpoint>/video/  (one folder per ckpt)
-# The wrapper auto-picks: --data_stat_path dataset_meta_info/<dataset>/stat.json (MUST match what
-# the ckpt trained on) and auto-discovers val episode ids from dataset_example/<dataset>/annotation/val/.
-#
-# Under the hood it calls rollout_replay_traj.py with new CLI overrides (all optional):
-#   --data_stat_path  --val_dataset_dir  --num_traj  --save_tag
-# so you can point any checkpoint at any eval set without touching config.py.
+Sprints
+1. 
+probe
+CUDA_VISIBLE_DEVICES=0 python scripts/action_sensitivity_probe.py \
+  --ckpt_path model_ckpt --dataset_names robocasa_opendrawer_full \
+  --svd_model_path checkpoints/svd --clip_model_path checkpoints/clip \
+  --out 

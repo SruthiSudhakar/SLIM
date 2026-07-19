@@ -61,9 +61,18 @@ class agent():
         self.policy = policy_config.create_trained_policy(config, args.pi_ckpt)
 
         # load ctrl-world model
-
+        # Auto-detect architecture from the checkpoint so eval "just works" for both old
+        # (baseline) and Change-A checkpoints without setting any flag: if the checkpoint
+        # carries the temporal action-encoder weights, build the model with that module.
+        _state_dict = torch.load(args.val_model_path, map_location='cpu')
+        _has_temporal = any(k.startswith('action_encoder.temporal_encoder') for k in _state_dict)
+        _has_action_mod = any(k.startswith('unet.action_mod') for k in _state_dict)  # Change B
+        args.use_temporal_action_encoder = _has_temporal
+        args.use_action_modulation = _has_action_mod
+        print(f"[eval] checkpoint: temporal_action_encoder={_has_temporal} action_modulation={_has_action_mod} "
+              f"-> building model to match")
         self.model = CrtlWorld(args)
-        self.model.load_state_dict(torch.load(args.val_model_path))
+        self.model.load_state_dict(_state_dict)  # strict: verifies arch matches exactly
         self.model.to(self.accelerator.device).to(self.dtype)
         self.model.eval()
         print("load world model success")
