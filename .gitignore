@@ -17,3 +17,4 @@ checkpoints/
 dataset_example/
 dataset_meta_info/
 todo.txt
+logs/*
