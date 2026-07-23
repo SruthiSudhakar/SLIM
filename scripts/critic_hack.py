@@ -228,7 +228,11 @@ def main():
     logger.info(f"sweeping {len(chosen)} pairs for {args.task_name}")
     agg = {n: {"flip": [], "steps": [], "drop": [], "relL2": [], "Linf": [], "hf": []} for n in configs}
     for i, spec in enumerate(chosen):
-        _, results = run_pair(spec)
+        frameB, results = run_pair(spec)
+        if i == 0:
+            png = save_report(processor, merge, frameB, results,
+                              args.out_dir, f"{args.task_name}_{spec['tag']}")
+            logger.info(f"wrote {png}")
         for name, r in results.items():
             a = agg[name]
             a["flip"].append(r["flipped"] is not None)
